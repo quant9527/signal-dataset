@@ -23,6 +23,14 @@ TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 # 均线颜色
 MA_COLORS = ["#ffeb3b", "#29b6f6", "#ab47bc", "#66bb6a", "#ffa726", "#ec407a"]
 
+
+def _fmt_price(v: float) -> float:
+    """价格类数值格式化：>=1 保留两位小数，<1 保留原精度。"""
+    if pd.isna(v):
+        return float("nan")
+    fv = float(v)
+    return round(fv, 2) if fv >= 1 else fv
+
 # Kline.html 调色板
 UP_COLOR = "#26a69a"
 DOWN_COLOR = "#ef5350"
@@ -208,14 +216,19 @@ def to_echarts_ohlc(prep: pd.DataFrame) -> list[list[float]]:
     """ECharts candlestick 数据，[open, close, low, high] 格式。"""
     rows: list[list[float]] = []
     for _, r in prep.iterrows():
-        rows.append([float(r["open"]), float(r["close"]), float(r["low"]), float(r["high"])])
+        rows.append([
+            _fmt_price(r["open"]),
+            _fmt_price(r["close"]),
+            _fmt_price(r["low"]),
+            _fmt_price(r["high"]),
+        ])
     return rows
 
 
 def to_echarts_volume(prep: pd.DataFrame) -> list[float | None]:
     if "volume" not in prep.columns:
         return []
-    return [None if pd.isna(v) else float(v) for v in prep["volume"]]
+    return [None if pd.isna(v) else _fmt_price(v) for v in prep["volume"]]
 
 
 def to_echarts_ma(prep: pd.DataFrame, ma_cols: list[str]) -> list[dict[str, Any]]:
@@ -534,6 +547,9 @@ def build_symbol_candle_option(
     if has_volume:
         y_axes[1]["axisLabel"]["formatter"] = "KLINE_VOL_FORMATTER"
 
+    # 价格 Y 轴：>=1 保留两位小数，避免长尾浮点
+    y_axes[0]["axisLabel"]["formatter"] = "KLINE_PRICE_FORMATTER"
+
     series: list[dict] = [
         {
             "name": "K线",
@@ -737,7 +753,11 @@ def build_echarts_html(chart_configs: list[dict], metas: dict[str, dict]) -> str
         )
         opt_json = opt_json.replace(
             '"KLINE_VOL_FORMATTER"',
-            "function(v){if(v>=1e8)return (v/1e8).toFixed(1)+'亿';if(v>=1e4)return (v/1e4).toFixed(1)+'万';return v;}",
+            "function(v){if(v>=1e8)return (v/1e8).toFixed(2)+'亿';if(v>=1e4)return (v/1e4).toFixed(2)+'万';return v>=1?v.toFixed(2):v;}",
+        )
+        opt_json = opt_json.replace(
+            '"KLINE_PRICE_FORMATTER"',
+            "function(v){return v>=1?Number(v).toFixed(2):v;}",
         )
         opts.append(f'ch["{cid}"].setOption({opt_json});')
 

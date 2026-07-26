@@ -166,8 +166,8 @@ def symbol_quick_add_ui(
     if not presets:
         return None
 
-    _label = label_func if label_func is not None else lambda ex, sym: f"{ex}:{sym}"
-    selected_set = selected if selected is not None else set()
+    _label = label_func or (lambda ex, sym: f"{ex}:{sym}")
+    selected_set = selected or set()
 
     with st.container(horizontal=True):
         for i, (ex, sym) in enumerate(presets):
@@ -216,16 +216,21 @@ def symbol_picker_selected_ui(
 
 
 # ============================================================
-# K 线 URL symbol 编码：exchange:symbol:freq[:reverse]，逗号分隔多个
+# K 线 URL symbol 编码：exchange:symbol[:freq][:reverse]，逗号分隔多个
+# freq 段缺失/为空时，SymbolToken.freq = None；具体语义由消费页面定义。
 # ============================================================
 
 
 class SymbolToken(NamedTuple):
-    """K 线单个标的的完整参数（对应 URL 中一段 token）。"""
+    """K 线单个标的的完整参数（对应 URL 中一段 token）。
+
+    `freq` 为 None 表示 URL token 中 freq 段缺失/为空，具体含义（如隐藏）
+    由消费页面定义；本模块保持协议层语义中立。
+    """
 
     exchange: str
     symbol: str
-    freq: str = KLINE_DEFAULT_FREQ
+    freq: str | None = KLINE_DEFAULT_FREQ
     reverse: bool = False
 
     @property
@@ -236,14 +241,17 @@ class SymbolToken(NamedTuple):
 def encode_symbol_token(
     exchange: str,
     symbol: str,
-    freq: str = KLINE_DEFAULT_FREQ,
+    freq: str | None = KLINE_DEFAULT_FREQ,
     reverse: bool = False,
 ) -> str:
-    """编码为 URL token：`as:000001:1d` 或 `asindex:sh000300:1w:reverse`。"""
+    """编码为 URL token：`as:000001:1d`、`as:000001` 或 `asindex:sh000300:1w:reverse`。"""
     ex = str(exchange).strip().lower()
     sym = str(symbol).strip()
-    fq = freq if freq in KLINE_FREQ_SET else KLINE_DEFAULT_FREQ
-    base = f"{ex}:{sym}:{fq}"
+    if freq is None:
+        base = f"{ex}:{sym}"
+    else:
+        fq = freq if freq in KLINE_FREQ_SET else KLINE_DEFAULT_FREQ
+        base = f"{ex}:{sym}:{fq}"
     return f"{base}:reverse" if reverse else base
 
 
@@ -258,13 +266,15 @@ def parse_symbol_tokens(raw: str | None) -> list[SymbolToken]:
             continue
         ex = parts[0].strip().lower()
         sym = parts[1].strip()
-        freq = parts[2].strip() if len(parts) > 2 else ""
-        reverse = len(parts) > 3 and parts[3].strip().lower() == "reverse"
+        reverse = len(parts) >= 3 and parts[-1].strip().lower() == "reverse"
+        if reverse:
+            parts = parts[:-1]
+        freq = parts[2].strip() if len(parts) > 2 else None
         if not ex or not sym:
             continue
-        if freq not in KLINE_FREQ_SET:
+        if freq and freq not in KLINE_FREQ_SET:
             freq = KLINE_DEFAULT_FREQ
-        entries.append(SymbolToken(ex, sym, freq, reverse))
+        entries.append(SymbolToken(ex, sym, freq or None, reverse))
     return entries
 
 
