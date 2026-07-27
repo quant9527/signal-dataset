@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -118,8 +119,6 @@ def _get_latest_market_flight(symbols: list, exchange: str = "as", flight_url: s
     通过 quant-lab Flight 服务拉取 K 线，取每只标的最近一根的 close 作为最新价。
     请求体与 flight_kline_client / quant-lab 一致。
     """
-    from datetime import datetime, timedelta
-
     import flight_kline_client as fkc
 
     if not symbols:
@@ -335,6 +334,132 @@ def get_latest_market_for_exchange(exchange: str, symbols: list | tuple | None =
                 return _get_latest_market_flight(symbols, exchange="ths")
         return pd.DataFrame(columns=["code", "price", "change_percent"])
     return pd.DataFrame(columns=["code", "price", "change_percent"])
+
+
+def get_surge_symbols(
+    symbols: list[str],
+    *,
+    exchange: str = "as",
+    days: int = 5,
+    threshold: float = 0.07,
+    flight_url: str | None = None,
+) -> set[str]:
+    """返回最近 `days` 天内任意一天涨幅 >= `threshold` 的 symbol 集合。
+
+    从 quant-lab Flight 拉取日线，按 (close - prev_close) / prev_close 计算日涨幅。
+    若 Flight 不可用或数据不足则返回空集合。
+    """
+    import flight_kline_client as fkc
+
+    if not symbols:
+        return set()
+
+    tags = fkc.build_kline_tags(list(symbols), exchange, "1d")
+    if not tags:
+        return set()
+
+    end_ts = int(datetime.now().timestamp() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=int(days) + 2)).timestamp() * 1000)
+    kline_df = fkc.fetch_kline_dataframe(
+        tags, start_ts, end_ts, flight_url=flight_url or os.environ.get("FLIGHT_URL", "grpc://127.0.0.1:50001")
+    )
+
+    if kline_df is None or kline_df.empty:
+        return set()
+
+    close_col = "close" if "close" in kline_df.columns else "Close"
+    if close_col not in kline_df.columns or "symbol" not in kline_df.columns:
+        return set()
+
+    ts_col = "end_ts" if "end_ts" in kline_df.columns else "timestamp"
+    if ts_col not in kline_df.columns:
+        return set()
+
+    kline_df = kline_df.copy()
+    kline_df[close_col] = pd.to_numeric(kline_df[close_col], errors="coerce")
+    kline_df = kline_df.dropna(subset=[close_col])
+
+    surge_symbols: set[str] = set()
+    for symbol, group in kline_df.groupby("symbol", sort=False):
+        group = group.sort_values(ts_col)
+        closes = group[close_col].tolist()
+        if len(closes) < 2:
+            continue
+        daily_returns = [
+            (closes[i] - closes[i - 1]) / closes[i - 1]
+            for i in range(1, len(closes))
+            if closes[i - 1] and closes[i - 1] != 0
+        ]
+        if any(r >= threshold for r in daily_returns[-days:]):
+            surge_symbols.add(str(symbol))
+
+    return surge_symbols
+
+
+def _calculate_macd_dif(close: pd.Series, fast: int = 12, slow: int = 26) -> pd.Series:
+    """计算 MACD DIF 线：EMA(fast) - EMA(slow)。"""
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    return ema_fast - ema_slow
+
+
+def get_weekly_dif_positive_symbols(
+    symbol_exchange_pairs: list[tuple[str, str]],
+    *,
+    flight_url: str | None = None,
+) -> set[tuple[str, str]]:
+    """返回周线 MACD DIF > 0 的 (symbol, exchange) 集合。
+
+    从 quant-lab Flight 拉取周线，按 exchange 分组计算 MACD DIF，
+    取最新一周 DIF > 0 的标的。仅处理 as / ths / asindex 三类 exchange。
+    """
+    import flight_kline_client as fkc
+
+    if not symbol_exchange_pairs:
+        return set()
+
+    by_exchange: dict[str, list[str]] = {}
+    for sym, ex in symbol_exchange_pairs:
+        by_exchange.setdefault(ex, []).append(str(sym).strip())
+
+    positive: set[tuple[str, str]] = set()
+    default_url = flight_url or os.environ.get("FLIGHT_URL", "grpc://127.0.0.1:50001")
+    end_ts = int(datetime.now().timestamp() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=365 * 3)).timestamp() * 1000)
+
+    for ex, syms in by_exchange.items():
+        if ex not in ("as", "ths", "asindex"):
+            continue
+        tags = fkc.build_kline_tags(syms, ex, "1w")
+        if not tags:
+            continue
+
+        kline_df = fkc.fetch_kline_dataframe(tags, start_ts, end_ts, flight_url=default_url)
+        if kline_df is None or kline_df.empty:
+            continue
+
+        close_col = "close" if "close" in kline_df.columns else "Close"
+        if close_col not in kline_df.columns or "symbol" not in kline_df.columns:
+            continue
+
+        ts_col = "end_ts" if "end_ts" in kline_df.columns else "timestamp"
+        if ts_col not in kline_df.columns:
+            continue
+
+        kline_df = kline_df.copy()
+        kline_df[close_col] = pd.to_numeric(kline_df[close_col], errors="coerce")
+        kline_df = kline_df.dropna(subset=[close_col])
+
+        for symbol, group in kline_df.groupby("symbol", sort=False):
+            group = group.sort_values(ts_col)
+            closes = group[close_col].reset_index(drop=True)
+            if len(closes) < 26:
+                continue
+            dif = _calculate_macd_dif(closes)
+            if dif.iloc[-1] > 0:
+                positive.add((str(symbol), ex))
+
+    return positive
 
 
 def _print_sql(query: str, params: tuple | list | None = None):
@@ -801,12 +926,15 @@ def query_signals_by_rule(where_clause: str, limit: int = 50) -> pd.DataFrame:
     from utils import normalize_signal_date_field
 
     try:
+        # psycopg 会把 SQL 中的 % 当作占位符处理；where_clause 里若含 LIKE 'xxx%'
+        # 这类字面量 %，需要提前转义为 %%，否则执行时报 "got '%'" 错误。
+        safe_where = where_clause.replace("%", "%%")
         query = f"""
             SELECT id, pick_id, exchange, symbol, freq, symbol_name,
                    signal_date, signal_name, side, price, score, reason,
                    created_at
             FROM signal
-            WHERE {where_clause}
+            WHERE {safe_where}
             ORDER BY signal_date DESC
             LIMIT %s
         """
