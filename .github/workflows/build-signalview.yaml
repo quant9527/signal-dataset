@@ -5,7 +5,7 @@ name: build-signalview
 on:
   push:
     branches:
-      - '*'
+      - '**'
 
 env:
   APP_NAME: signalview
