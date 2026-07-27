@@ -12,6 +12,8 @@ from app_pages.kline_charts import (
     date_labels,
     extract_symbol_data,
     map_signals_to_bars,
+    to_echarts_ohlc,
+    to_echarts_volume,
 )
 
 
@@ -44,12 +46,31 @@ def test_parse_roundtrip() -> None:
     assert ",".join(e.token for e in entries) == raw
 
 
-def test_parse_garbage_skipped_and_freq_fixed() -> None:
+def test_parse_missing_freq_means_hidden() -> None:
     entries = parse_symbol_tokens("as:000001,,:badfreq,as:000002:5m")
     assert entries == [
-        SymbolToken("as", "000001", "1d", False),
+        SymbolToken("as", "000001", None, False),
         SymbolToken("as", "000002", "5m", False),
     ]
+
+
+def test_encode_none_freq() -> None:
+    assert encode_symbol_token("as", "000001", None, False) == "as:000001"
+
+
+def test_encode_none_freq_with_reverse() -> None:
+    assert encode_symbol_token("as", "000001", None, True) == "as:000001:reverse"
+
+
+def test_parse_none_freq_with_reverse() -> None:
+    entries = parse_symbol_tokens("as:000001:reverse")
+    assert entries == [SymbolToken("as", "000001", None, True)]
+
+
+def test_parse_hidden_roundtrip() -> None:
+    raw = "as:000001,ths:600519:1d,hyperliquid:BTC:1h:reverse"
+    entries = parse_symbol_tokens(raw)
+    assert ",".join(e.token for e in entries) == raw
 
 
 def test_parse_empty() -> None:
@@ -233,3 +254,27 @@ def test_build_echarts_html_escapes_script_tag() -> None:
     # The dangerous literal from the title must be escaped inside the option JSON.
     assert '"</script><script>alert(1)</script>"' not in html
     assert '"<\\/script><\\/script>"' in html or '"<\\/script><script>alert(1)<\\/script>"' in html
+
+
+# ---------- 数值格式化 ----------
+
+
+def test_to_echarts_ohlc_rounds_ge_one_to_two_decimals() -> None:
+    """>=1 的 OHLC 保留两位小数；<1 保留原精度。"""
+    prep = pd.DataFrame({
+        "open": [1.23456, 0.12345],
+        "close": [2.34567, 0.23456],
+        "low": [1.11111, 0.11111],
+        "high": [3.33333, 0.33333],
+    })
+    ohlc = to_echarts_ohlc(prep)
+    assert ohlc[0] == [1.23, 2.35, 1.11, 3.33]
+    assert ohlc[1] == [0.12345, 0.23456, 0.11111, 0.33333]
+
+
+def test_to_echarts_volume_rounds_ge_one_to_two_decimals() -> None:
+    """>=1 的成交量保留两位小数；<1 保留原精度。"""
+    prep = pd.DataFrame({"volume": [1234.5678, 0.9876]})
+    vol = to_echarts_volume(prep)
+    assert vol[0] == 1234.57
+    assert vol[1] == 0.9876

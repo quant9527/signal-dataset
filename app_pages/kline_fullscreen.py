@@ -3,8 +3,8 @@ K 线图表页：Kline.html 风格渲染（深色面板、固定 tooltip、箭�
 
 - 单页合并：顶部为参数设置 UI（标的选 + 周期/日期/信号），底部为 ECharts K 线图。
 - 业务状态全部保存在 URL query params；widget 自身 state 仅用于 plumbing。
-- `symbol=exchange:symbol:freq[:reverse]`，逗号分隔多个；`start` / `end` 全局日期。
-- 按 (freq, reverse) 分组分别调用 Flight，再按 symbol 提取。
+- `symbol=exchange:symbol[:freq][:reverse]`，逗号分隔多个；无 freq 表示该 symbol 隐藏（保留控制栏，不拉取/不渲染）。
+- `start` / `end` 全局日期；按 (freq, reverse) 分组分别调用 Flight，再按 symbol 提取。
 """
 
 from __future__ import annotations
@@ -45,24 +45,12 @@ KLINE_QUICK_ADD_PRESETS: list[tuple[str, str]] = [
 def _symbol_chart_height(chart_count: int) -> int:
     """根据图表数量动态计算单个图表高度。"""
     if chart_count <= 1:
-        return 600
+        return SYMBOL_CHART_HEIGHT
     if chart_count == 2:
         return 420
     if chart_count == 3:
         return 320
     return 280
-
-
-def _qp_str(key: str) -> str:
-    return common.qp_str(key)
-
-
-def _qp_bool(key: str) -> bool:
-    return common.qp_bool(key)
-
-
-def _parse_iso_date(s: str) -> date | None:
-    return common.parse_iso_date(s)
 
 
 def _sync_url_params(
@@ -77,10 +65,10 @@ def _sync_url_params(
     expected_end = end_d.isoformat()
     expected_all = "1" if all_signals else "0"
 
-    cur_symbol = _qp_str("symbol")
-    cur_start = _qp_str("start")
-    cur_end = _qp_str("end")
-    cur_all = _qp_str("all_signals")
+    cur_symbol = common.qp_str("symbol")
+    cur_start = common.qp_str("start")
+    cur_end = common.qp_str("end")
+    cur_all = common.qp_str("all_signals")
 
     if not entries:
         if "symbol" in st.query_params:
@@ -103,6 +91,11 @@ def _sync_url_params(
         changed = True
     if changed:
         st.rerun()
+
+
+def _widget_key_safe(value: str) -> str:
+    """把字符串中的非字母数字字符替换为下划线，生成 Streamlit widget key。"""
+    return "".join(c if c.isalnum() else "_" for c in value)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -171,8 +164,17 @@ def _chart_title(token: SymbolToken, name_map: dict[tuple[str, str], str]) -> st
 def _group_entries(entries: list[SymbolToken]) -> dict[tuple[str, bool], list[SymbolToken]]:
     groups: dict[tuple[str, bool], list[SymbolToken]] = {}
     for e in entries:
+        if e.freq is None:
+            continue
         groups.setdefault((e.freq, e.reverse), []).append(e)
     return groups
+
+
+def _default_new_entry_freq(entries: list[SymbolToken]) -> str:
+    """新增标的继承首个可见标的的周期；首个为 hidden 或无标的时使用默认周期。"""
+    if entries and entries[0].freq:
+        return entries[0].freq
+    return KLINE_DEFAULT_FREQ
 
 
 def _fetch_groups(
@@ -214,8 +216,9 @@ def _build_charts(
     all_signals: bool = False,
 ) -> tuple[list[dict], dict[str, dict], dict[str, int]]:
     """构建对比图 + 各标的图；返回 (chart_configs, metas, bar_counts)。"""
+    visible_entries = [e for e in entries if e.freq is not None]
     sym_data: dict[str, tuple[pd.DataFrame, dict]] = {}
-    for e in entries:
+    for e in visible_entries:
         frame = frames.get((e.freq, e.reverse))
         sk = _entry_sym_key(e)
         if frame is None or sk is None:
@@ -227,13 +230,13 @@ def _build_charts(
     if not sym_data:
         return [], {}, {}
 
-    name_map = _build_symbol_name_map(tuple((e.exchange, e.symbol) for e in entries))
+    name_map = _build_symbol_name_map(tuple((e.exchange, e.symbol) for e in visible_entries))
 
     charts: list[dict] = []
     metas: dict[str, dict] = {}
-    chart_height = _symbol_chart_height(len(entries))
+    chart_height = _symbol_chart_height(len(visible_entries))
 
-    for e in entries:
+    for e in visible_entries:
         if e.token not in sym_data:
             continue
         prep, meta = sym_data[e.token]
@@ -296,13 +299,13 @@ def page_kline_fullscreen() -> None:
     default_end = date.today()
     default_start = default_end - timedelta(days=365)
 
-    raw_symbol = _qp_str("symbol")
+    raw_symbol = common.qp_str("symbol")
     entries = parse_symbol_tokens(raw_symbol)
 
-    start_d = _parse_iso_date(_qp_str("start")) or default_start
-    end_d = _parse_iso_date(_qp_str("end")) or default_end
+    start_d = common.parse_iso_date(common.qp_str("start")) or default_start
+    end_d = common.parse_iso_date(common.qp_str("end")) or default_end
     # 默认显示全部周期信号
-    all_signals = True if "all_signals" not in st.query_params else _qp_bool("all_signals")
+    all_signals = True if "all_signals" not in st.query_params else common.qp_bool("all_signals")
     if start_d > end_d:
         st.error("开始日期不能晚于结束日期。")
         st.stop()
@@ -331,12 +334,8 @@ def page_kline_fullscreen() -> None:
         key_prefix="kfs_quick",
     )
     if clicked_preset is not None:
-        ex, sym = clicked_preset
-        if (ex, sym) in selected_presets:
-            new_presets = selected_presets - {(ex, sym)}
-        else:
-            new_presets = selected_presets | {(ex, sym)}
-        default_freq = entries[0].freq if entries else KLINE_DEFAULT_FREQ
+        new_presets = selected_presets ^ {clicked_preset}
+        default_freq = _default_new_entry_freq(entries)
         preset_tokens = [
             encode_symbol_token(ex_p, sym_p, default_freq)
             for ex_p, sym_p in new_presets
@@ -348,7 +347,7 @@ def page_kline_fullscreen() -> None:
     add_result = symbol_picker_add_ui(key_prefix="kfs_add")
     if add_result is not None:
         ex, sym = add_result
-        default_freq = entries[0].freq if entries else KLINE_DEFAULT_FREQ
+        default_freq = _default_new_entry_freq(entries)
         new_token = encode_symbol_token(ex, sym, default_freq)
         if new_token not in {e.token for e in entries}:
             st.query_params["symbol"] = ",".join(
@@ -361,6 +360,7 @@ def page_kline_fullscreen() -> None:
 
     # ---------- 标的控制栏（freq pills + popover 删除）----------
     freq_changed = False
+    new_entries: list[SymbolToken] = []
     removed_idx: int | None = None
     for i, e in enumerate(entries):
         label = _name_of(e)
@@ -381,27 +381,36 @@ def page_kline_fullscreen() -> None:
                     ):
                         removed_idx = i
             with c_freq:
+                pills_key = f"kfs_freq_pills_{e.exchange}_{_widget_key_safe(e.symbol)}"
                 new_freq = st.pills(
                     f"周期_{i}",
                     options=list(KLINE_FREQ_OPTIONS),
-                    default=e.freq if e.freq in KLINE_FREQ_OPTIONS else KLINE_FREQ_OPTIONS[0],
-                    key=f"kfs_freq_pills_{i}",
+                    default=e.freq if e.freq in KLINE_FREQ_OPTIONS else None,
+                    key=pills_key,
                     label_visibility="collapsed",
                 )
-                if new_freq and new_freq != e.freq:
+                if new_freq != e.freq:
                     freq_changed = True
-                    entries[i] = SymbolToken(e.exchange, e.symbol, new_freq, e.reverse)
+                    new_entries.append(SymbolToken(e.exchange, e.symbol, new_freq, e.reverse))
+                else:
+                    new_entries.append(e)
 
+    entries = new_entries
     if removed_idx is not None:
-        new_entries = [e for i, e in enumerate(entries) if i != removed_idx]
-        if new_entries:
-            st.query_params["symbol"] = ",".join(e.token for e in new_entries)
+        remaining = [e for i, e in enumerate(entries) if i != removed_idx]
+        if remaining:
+            st.query_params["symbol"] = ",".join(e.token for e in remaining)
         elif "symbol" in st.query_params:
             del st.query_params["symbol"]
         st.rerun()
     if freq_changed:
         st.query_params["symbol"] = ",".join(e.token for e in entries)
         st.rerun()
+
+    # ---------- 空可见集兜底 ----------
+    if not any(e.freq is not None for e in entries):
+        st.info("所有标的均已隐藏，请为其选择周期。")
+        st.stop()
 
     # ---------- 日期 & 信号设置 ----------
     c_d1, c_d2, c_sig = st.columns([2, 2, 3], vertical_alignment="center", gap="small")

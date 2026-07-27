@@ -5,7 +5,7 @@ name: build-signalview
 on:
   push:
     branches:
-      - '*'
+      - '**'
 
 env:
   APP_NAME: signalview
@@ -28,7 +28,7 @@ jobs:
         id: vars
         run: |
           echo "sha_short=$(git rev-parse --short HEAD)" >>$GITHUB_OUTPUT
-          echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >>$GITHUB_OUTPUT
+          echo "branch=$(echo ${GITHUB_REF#refs/heads/} | tr '/' '-')" >>$GITHUB_OUTPUT
 
       - name: Set image tag
         id: image_tag
