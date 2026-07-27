@@ -5,9 +5,17 @@
 # ---------------------------------------------------------------------------
 NESTED_2BC_PREFIX: str = "nested_2bc"
 PAIR_SEG_PREFIX: str = "pair_seg"
+CL2B_PAIR_PREFIX: str = "cl2b_pair"
+BC_XD4_PREFIX: str = "bc_xd4"
 CL3B_MACD_PREFIX: str = "cl3b_macd"
 CL3B_ZSX_PREFIX: str = "cl3b_zsx"
 CMP_PREFIX: str = "cmp"
+
+# ---------------------------------------------------------------------------
+# AS 模式范围：所有 AS 模式页面（Signal Filters / AS 模式）的 SQL 都应限制
+# 在以下 exchange 取值范围内，避免 crypto（hyperliquid）等混入。
+# ---------------------------------------------------------------------------
+AS_ALL_EXCHANGES: tuple[str, ...] = ("as", "ths", "asindex")
 
 # ---------------------------------------------------------------------------
 # nested_2bc 已知全名（可按库内实际继续追加）
