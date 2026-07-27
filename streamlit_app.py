@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from reports_server import start_reports_server
-
 # Pages are imported for their module-level `page_<name>()` callables.
 from app_pages.active_vol_then_nestedbc import page_active_vol_then_nestedbc
 from app_pages.alert_rule_crud import page_alert_rule_crud
@@ -38,9 +36,9 @@ from app_pages.review_key import page_review_key
 from app_pages.review_today import page_review_today
 from app_pages.search_signals import page_search_signals
 from app_pages.sector_signals import page_sector_signals
+from app_pages.signal_bc_xd4 import page_signal_bc_xd4
+from app_pages.signal_cl2b_pair import page_signal_cl2b_pair
 from app_pages.today_opportunities import page_today_opportunities
-
-start_reports_server()
 
 pages: dict[str, list[st.StreamlitPage]] = {
     "Dashboard": [
@@ -83,6 +81,12 @@ pages: dict[str, list[st.StreamlitPage]] = {
                 url_path="sector_signals"),
         st.Page(page_search_signals,         title="Search Signals",        icon="🔍",
                 url_path="search_signals"),
+    ],
+    "AS 模式": [
+        st.Page(page_signal_cl2b_pair, title="CL2B Pair", icon="🔎",
+                url_path="signal_cl2b_pair"),
+        st.Page(page_signal_bc_xd4, title="BC XD4", icon="📉",
+                url_path="signal_bc_xd4"),
     ],
     "Tools": [
         st.Page(page_instrument_groups, title="Instrument Groups", icon="📁",

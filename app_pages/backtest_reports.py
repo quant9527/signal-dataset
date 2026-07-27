@@ -10,10 +10,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from reports_server import REPORTS_SERVER_PORT
-
 # quant-lab 报告目录，可根据部署环境调整
 QUANT_LAB_FILES = "/home/lei/repo/quant-lab/files"
+
+# Streamlit static serving 路径（需配合 server.enableStaticServing=true）
+STATIC_REPORTS_URL = "/app/static/reports"
 
 
 def _extract_title(html_text: str) -> str:
@@ -141,7 +142,7 @@ def page_backtest_reports() -> None:
     _display_df["created_at"] = _display_df["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
     _display_df["pkl_exists"] = _display_df["pkl_exists"].map({True: "✅", False: "❌"})
     _display_df["预览"] = [
-        f'<a href="http://127.0.0.1:{REPORTS_SERVER_PORT}/{html.escape(fname)}" target="_blank">🔍 预览</a>'
+        f'<a href="{STATIC_REPORTS_URL}/{html.escape(fname)}" target="_blank">🔍 预览</a>'
         for fname in df["filename"]
     ]
     _display_df.rename(
