@@ -4,11 +4,14 @@ EXCHANGE_THS = "ths"
 EXCHANGE_BINANCE = "binance"
 EXCHANGE_ASINDEX = "asindex"
 EXCHANGE_HYPERLIQUID = "hyperliquid"
+EXCHANGE_AS_ALL = "as_all"
 
 EXCHANGE_OPTIONS = [EXCHANGE_AS, EXCHANGE_EM, EXCHANGE_THS, EXCHANGE_BINANCE]
 
-# K 线页（Flight tag 前缀）：与全局 EXCHANGE_OPTIONS 不同，含指数 asindex、无 em/binance
+# K 线页（Flight tag 前缀）：与全局 EXCHANGE_OPTIONS 不同，含指数 asindex、无 em/binance。
+# 下拉额外提供 as_all（as/ths/asindex 合集），为展示用聚合项，非真实交易所。
 KLINE_EXCHANGE_OPTIONS = (EXCHANGE_AS, EXCHANGE_THS, EXCHANGE_ASINDEX, EXCHANGE_HYPERLIQUID)
+KLINE_EXCHANGE_SELECT_OPTIONS = (*KLINE_EXCHANGE_OPTIONS, EXCHANGE_AS_ALL)
 
 KLINE_DEFAULT_FREQ = "1d"
 KLINE_FREQ_OPTIONS = ("1d", "2h", "1h", "30m", "15m", "5m", "1w")

@@ -16,8 +16,15 @@ from typing import Any, Callable, NamedTuple
 
 import streamlit as st
 
-from constants import KLINE_DEFAULT_FREQ, KLINE_EXCHANGE_OPTIONS, KLINE_FREQ_SET
+from constants import (
+    EXCHANGE_AS_ALL,
+    KLINE_DEFAULT_FREQ,
+    KLINE_EXCHANGE_OPTIONS,
+    KLINE_EXCHANGE_SELECT_OPTIONS,
+    KLINE_FREQ_SET,
+)
 from data import get_instruments_by_exchange
+from signal_constants import AS_ALL_EXCHANGES
 
 
 def _split_symbol_input(raw: str) -> list[str]:
@@ -59,6 +66,23 @@ def _clean_symbol_code(sym: str) -> str:
     return sym
 
 
+def _instruments_for_exchange(exchange: str) -> pd.DataFrame:
+    """按交易所获取 instrument；as_all 时合并 as/ths/asindex 三张表。
+
+    返回列与 get_instruments_by_exchange 一致：exchange, symbol, name, sub_exchange, alias。
+    """
+    import pandas as pd
+
+    if exchange == EXCHANGE_AS_ALL:
+        frames = [
+            f for ex in AS_ALL_EXCHANGES if not (f := get_instruments_by_exchange(ex)).empty
+        ]
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+    return get_instruments_by_exchange(exchange)
+
+
 def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
     """
     Render exchange selector + searchable symbol dropdown + add button in one row.
@@ -75,22 +99,36 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
     with c1:
         a_exchange: str = st.selectbox(
             "交易所",
-            options=list(KLINE_EXCHANGE_OPTIONS),
+            options=list(KLINE_EXCHANGE_SELECT_OPTIONS),
             key=f"{key_prefix}_exchange",
             label_visibility="collapsed",
             placeholder="交易所",
         )
 
-    add_inst = get_instruments_by_exchange(a_exchange)
+    is_as_all = a_exchange == EXCHANGE_AS_ALL
+    add_inst = _instruments_for_exchange(a_exchange)
     with c2:
         if not add_inst.empty:
-            sym_list = sorted(add_inst["symbol"].tolist())
-            name_map: dict[str, Any] = dict(
-                zip(add_inst["symbol"], add_inst["name"], strict=False)
-            )
-            if "alias" in add_inst.columns:
-                alias_map: dict[str, str] = {}
-                for _, row in add_inst.iterrows():
+            if is_as_all:
+                # 合集下代码会跨交易所重复，用 "exchange:symbol" 作为选项值以消歧
+                sym_list = sorted(
+                    add_inst["exchange"].astype(str) + ":" + add_inst["symbol"].astype(str)
+                )
+                display_prefix = True
+            else:
+                sym_list = sorted(add_inst["symbol"].tolist())
+                display_prefix = False
+
+            name_map: dict[str, Any] = {}
+            alias_map: dict[str, str] = {}
+            for _, row in add_inst.iterrows():
+                key = (
+                    f"{row['exchange']}:{row['symbol']}"
+                    if display_prefix
+                    else str(row["symbol"])
+                )
+                name_map[key] = row["name"]
+                if "alias" in add_inst.columns:
                     aliases = row.get("alias")
                     if isinstance(aliases, (list, tuple)):
                         sym_low = str(row["symbol"]).lower()
@@ -101,18 +139,28 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
                             if str(a).lower() not in (sym_low, nam_low)
                         ]
                         if extra:
-                            alias_map[row["symbol"]] = "_".join(extra)
-            else:
-                alias_map = {}
+                            alias_map[key] = "_".join(extra)
+
+            def _fmt(s: str) -> str:
+                ex_part = ""
+                sym_part = s
+                if display_prefix:
+                    ex_part, sym_part = s.split(":", 1)
+                label = f"{sym_part}"
+                if display_prefix:
+                    label = f"{ex_part}:{sym_part}"
+                name = name_map.get(s, "")
+                alias = alias_map.get(s, "")
+                if name:
+                    label = f"{label}_{name}"
+                if alias:
+                    label = f"{label}_{alias}"
+                return label
 
             a_symbol: str = st.selectbox(
                 "代码",
                 options=sym_list,
-                format_func=lambda s: (
-                    f"{s}"
-                    + (f"_{name_map.get(s, '')}" if name_map.get(s, "") else "")
-                    + (f"_{alias_map.get(s, '')}" if alias_map.get(s) else "")
-                ),
+                format_func=_fmt,
                 key=f"{key_prefix}_symbol_select",
                 label_visibility="collapsed",
                 placeholder="代码",
@@ -129,7 +177,19 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
         add_clicked = st.button("添加", key=f"{key_prefix}_add", width="stretch")
 
     if add_clicked:
-        sym_val = _clean_symbol_code(str(a_symbol).strip())
+        raw_val = str(a_symbol).strip()
+        if not raw_val:
+            return None
+        if is_as_all:
+            if ":" in raw_val:
+                ex, sym = raw_val.split(":", 1)
+                ex = ex.strip().lower()
+                if ex in AS_ALL_EXCHANGES:
+                    sym_val = _clean_symbol_code(sym.strip())
+                    if sym_val:
+                        return (ex, sym_val)
+            return None
+        sym_val = _clean_symbol_code(raw_val)
         if sym_val:
             return (a_exchange, sym_val)
     return None
