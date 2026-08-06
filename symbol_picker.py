@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, NamedTuple
 
+import pandas as pd
 import streamlit as st
 
 from constants import (
@@ -71,8 +72,6 @@ def _instruments_for_exchange(exchange: str) -> pd.DataFrame:
 
     返回列与 get_instruments_by_exchange 一致：exchange, symbol, name, sub_exchange, alias。
     """
-    import pandas as pd
-
     if exchange == EXCHANGE_AS_ALL:
         frames = [
             f for ex in AS_ALL_EXCHANGES if not (f := get_instruments_by_exchange(ex)).empty
@@ -97,9 +96,11 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
     """
     c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="bottom")
     with c1:
+        exchange_options = list(KLINE_EXCHANGE_SELECT_OPTIONS)
         a_exchange: str = st.selectbox(
             "交易所",
-            options=list(KLINE_EXCHANGE_SELECT_OPTIONS),
+            options=exchange_options,
+            index=exchange_options.index(EXCHANGE_AS_ALL),
             key=f"{key_prefix}_exchange",
             label_visibility="collapsed",
             placeholder="交易所",
