@@ -25,11 +25,22 @@ from app_pages import backtest_reports as br  # noqa: E402
 
 @pytest.fixture
 def fake_files_dir(monkeypatch, tmp_path):
-    """把 QUANT_LAB_FILES 重定向到 tmp_path，不污染真实目录。"""
+    """把 QUANT_LAB_FILES 重定向到 tmp_path，不污染真实目录。
+
+    AppTest 的 LocalScriptRunner 与 pytest 跑在同一进程，因此 AppTest
+    runner 字符串对 ``br.QUANT_LAB_FILES`` 的赋值会在测试间共享。
+    fixture 既要在测试开始时设置，也要在结束时还原（monkeypatch 自动做），
+    此外我们额外在 fixture 入口清缓存、退出时再次清理，确保两次测试间
+    互不干扰。
+    """
+    real_default = "/home/lei/repo/quant-lab/files"
     monkeypatch.setattr(br, "QUANT_LAB_FILES", str(tmp_path))
-    # 每次 fixture 触发清掉 st.cache_data 缓存（测试间不共享旧目录结果）
     br._list_reports_cached.clear()
-    return tmp_path
+    yield tmp_path
+    # 测试结束：显式还原到真实默认路径，避免被 AppTest runner 改写的全局
+    # 状态影响下一个测试的 AppTest runner（monkeypatch 会再还原一次，双保险）。
+    br.QUANT_LAB_FILES = real_default
+    br._list_reports_cached.clear()
 
 
 def _make_dummy_pkl(path: Path, *, start="2026-01-01", end="2026-07-01",
@@ -228,7 +239,83 @@ class TestPageRenders:
         assert "📊 回测报告管理" in titles
         subs = [s.value for s in at.subheader]
         assert any("共 1 份报告" in s for s in subs), f"subheaders: {subs}"
-        # selectbox 列出 alpha
-        for sb in at.selectbox:
-            if sb.label == "选择一份报告查看详情":
-                assert any("alpha" in opt for opt in sb.options)
+        # 列表页不再渲染详情（selectbox "选择一份报告查看详情" 已移除）
+        assert all(
+            sb.label != "选择一份报告查看详情" for sb in at.selectbox
+        ), "列表页不应再出现「选择一份报告查看详情」selectbox"
+        # 每个 item 用 markdown 行承载 base / pick_id；详情按钮由 st.link_button
+        # 生成，AppTest 在当前 Streamlit 版本下不暴露 link_button 元素，
+        # 跳转 URL 在 backtest_reports.py 中硬编码为
+# /backtest_report_detail?base=<row.base>
+        row_md = [m.value for m in at.markdown if "alpha" in m.value]
+        assert len(row_md) == 1, f"应恰好 1 条 alpha 行 markdown，实际 {len(row_md)}: {row_md}"
+        assert "alpha" in row_md[0]
+        # 不再有独立的"🔍 查看详情"区块（详情按钮直接挂在每个 item 容器内）
+        subs = [s.value for s in at.subheader]
+        assert "🔍 查看详情" not in subs, f"列表页不应再单独出现「🔍 查看详情」subheader: {subs}"
+        # 每行 caption 应展示时间戳
+        time_caps = [c for c in at.caption if "2026-08-05 10:00:00" in c.value]
+        assert len(time_caps) == 1, f"应恰好 1 条时间 caption，实际 {len(time_caps)}: {time_caps}"
+
+    def test_detail_page_requires_base(self, fake_files_dir):
+        """详情页缺 ?base= 时应给出明确提示并停止渲染。"""
+        from streamlit.testing.v1 import AppTest
+
+        runner = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "import streamlit as st\n"
+            "from app_pages.backtest_report_detail import page_backtest_report_detail\n"
+            "page_backtest_report_detail()\n"
+        )
+        at = AppTest.from_string(runner)
+        at.run()
+        assert list(at.exception) == [], f"page 抛异常: {list(at.exception)}"
+        warnings = [w.value for w in at.warning]
+        assert any("base" in w for w in warnings), f"warnings: {warnings}"
+
+    def test_detail_page_renders_with_base(self, fake_files_dir):
+        """详情页 ?base=... 命中时应渲染指标子标题与信号明细。"""
+        from streamlit.testing.v1 import AppTest
+
+        _make_dummy_pkl(fake_files_dir / "20260805_100000_alpha.pkl", n_signals=1)
+        # 把目录路径也注入子进程，否则 monkeypatch 不会跨进程传递
+        files_dir = str(fake_files_dir)
+
+        runner = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "import streamlit as st\n"
+            "import app_pages.backtest_report_detail as det\n"
+            "import app_pages.backtest_reports as br\n"
+            f"br.QUANT_LAB_FILES = {files_dir!r}\n"
+            "st.query_params['base'] = '20260805_100000_alpha'\n"
+            "det.page_backtest_report_detail()\n"
+        )
+        at = AppTest.from_string(runner)
+        at.run()
+        assert list(at.exception) == [], f"page 抛异常: {list(at.exception)}"
+        subs = [s.value for s in at.subheader]
+        assert any("alpha" in s for s in subs), f"subheaders: {subs}"
+        # 信号明细应可见
+        assert len(at.dataframe) >= 1, "至少应有一个 dataframe（信号明细）"
+
+    def test_detail_page_missing_base_gracefully(self, fake_files_dir):
+        """?base 指向不存在的 pkl 时应报错但不抛异常。"""
+        from streamlit.testing.v1 import AppTest
+
+        runner = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "import streamlit as st\n"
+            "import app_pages.backtest_report_detail as det\n"
+            "import app_pages.backtest_reports as br\n"
+            f"br.QUANT_LAB_FILES = {str(fake_files_dir)!r}\n"
+            "st.query_params['base'] = 'definitely_missing_xyz'\n"
+            "det.page_backtest_report_detail()\n"
+        )
+        at = AppTest.from_string(runner)
+        at.run()
+        assert list(at.exception) == [], f"page 抛异常: {list(at.exception)}"
+        errors = [e.value for e in at.error]
+        assert any("无法加载" in e or "pkl" in e.lower() for e in errors), f"errors: {errors}"

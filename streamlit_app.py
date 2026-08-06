@@ -17,6 +17,7 @@ import streamlit as st
 from app_pages.active_vol_then_nestedbc import page_active_vol_then_nestedbc
 from app_pages.alert_rule_crud import page_alert_rule_crud
 from app_pages.all_signals_by_symbol import page_all_signals_by_symbol
+from app_pages.backtest_report_detail import page_backtest_report_detail
 from app_pages.backtest_reports import page_backtest_reports
 from app_pages.dashboard_as import page_dashboard_as
 from app_pages.dashboard_binance import page_dashboard_binance
@@ -70,6 +71,8 @@ pages: dict[str, list[st.StreamlitPage]] = {
     "Reports": [
         st.Page(page_backtest_reports, title="Backtest Reports", icon="📈",
                 url_path="backtest_reports"),
+        st.Page(page_backtest_report_detail, title="Backtest Report Detail",
+                icon="📑", url_path="backtest_report_detail"),
     ],
     "Performance": [
         st.Page(page_performance, title="Performance", icon="📊", url_path="performance"),

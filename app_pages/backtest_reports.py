@@ -353,14 +353,28 @@ def page_backtest_reports() -> None:
     st.dataframe(_display_df, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("🔍 查看详情")
-    selected = st.selectbox(
-        "选择一份报告查看详情",
-        options=df["base"].tolist(),
-        format_func=lambda b: f"{b}  ({df[df['base'] == b]['pick_id'].iloc[0]})",
-    )
-    if selected:
-        _render_detail(selected)
+    # 每份报告一个独立 item：左侧元信息 + 右侧"📑 详情"按钮，按钮在 item 内部。
+    # 点击跳转 url_path=backtest_report_detail（独立详情页，列表页不渲染详情）。
+    for _, row in df.iterrows():
+        with st.container(border=True):
+            c_info, c_act = st.columns([7, 1])
+            with c_info:
+                st.markdown(
+                    f"**{row['base']}**  &nbsp; "
+                    f"<span style='color:gray'>({row['pick_id']})</span>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    pd.to_datetime(row["created_at"]).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                )
+            with c_act:
+                st.link_button(
+                    "📑 详情",
+                    url=f"/backtest_report_detail?base={row['base']}",
+                    width="stretch",
+                )
 
     st.divider()
     st.subheader("🗑️ 删除报告")
