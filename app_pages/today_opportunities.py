@@ -250,7 +250,7 @@ def page_today_opportunities() -> None:
                 detail_df = group[detail_cols].copy()
                 detail_df['signal_date'] = detail_df['signal_date'].dt.strftime('%Y-%m-%d %H:%M')
                 detail_df['score'] = detail_df['score'].astype(int)
-                st.dataframe(detail_df, hide_index=True, use_container_width=True)
+                st.dataframe(detail_df, hide_index=True, width="stretch")
 
                 if exchange == 'ths':
                     constituents = get_sector_constituents_from_db(symbol, 'ths')
@@ -296,7 +296,7 @@ def page_today_opportunities() -> None:
             tooltip=['symbol', 'name', 'signal_count', 'latest_signal'],
         ).properties(height=300)
 
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     st.divider()
     st.markdown("### 📈 信号类型分布")
@@ -314,7 +314,7 @@ def page_today_opportunities() -> None:
         tooltip=['signal_name', 'count'],
     ).properties(height=400)
 
-    st.altair_chart(dist_chart, use_container_width=True)
+    st.altair_chart(dist_chart, width="stretch")
 
     st.divider()
     with st.expander("📥 下载完整数据", expanded=False):
@@ -333,5 +333,5 @@ def page_today_opportunities() -> None:
         )
 
         st.dataframe(
-            download_df, hide_index=True, use_container_width=True, height=400
+            download_df, hide_index=True, width="stretch", height=400
         )

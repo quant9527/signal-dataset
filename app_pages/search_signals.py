@@ -56,12 +56,12 @@ def page_search_signals() -> None:
 
     nav_col1, nav_col2 = st.columns(2)
     with nav_col1:
-        if st.button("股票信号", use_container_width=True):
+        if st.button("股票信号", width="stretch"):
             st.query_params.clear()
             st.query_params["exclude_exchange"] = "binance"
             st.rerun()
     with nav_col2:
-        if st.button("Binance信号", use_container_width=True):
+        if st.button("Binance信号", width="stretch"):
             st.query_params.clear()
             st.query_params["exchange"] = "binance"
             st.rerun()

@@ -96,7 +96,7 @@ def page_alert_rule_crud() -> None:
                                                 value=50, step=10, key="sig_limit")
                 with col_btn:
                     st.markdown("###### &nbsp;")
-                    run_query = st.button("🔍 查询", type="primary", use_container_width=True)
+                    run_query = st.button("🔍 查询", type="primary", width="stretch")
 
                 if run_query:
                     with st.spinner("查询中..."):
@@ -149,15 +149,15 @@ def page_alert_rule_crud() -> None:
                     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
                     with col_btn1:
                         saved = st.form_submit_button("💾 保存", type="primary",
-                                                      use_container_width=True)
+                                                      width="stretch")
                     with col_btn2:
                         toggled = st.form_submit_button(
                             "🔄 禁用" if selected_rule["enabled"] else "🔄 启用",
-                            use_container_width=True,
+                            width="stretch",
                         )
                     with col_btn3:
                         deleted = st.form_submit_button("🗑️ 删除", type="secondary",
-                                                        use_container_width=True)
+                                                        width="stretch")
 
                     if saved:
                         if not edit_name.strip() or not edit_where.strip():
