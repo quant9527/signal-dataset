@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -63,9 +65,19 @@ _FILTER_SQLS: list[dict[str, str | bool]] = [
 ]
 
 
-def _load_bc_xd4_signals(days: int = 45) -> pd.DataFrame:
-    """加载最近 N 天的 bc_xd4 系列信号，并限制在 AS 模式范围内。"""
-    df = get_cached_data(days, signal_name_prefix=BC_XD4_PREFIX)
+def _load_bc_xd4_signals() -> pd.DataFrame:
+    """加载 bc_xd4 系列信号并限制在 AS 模式范围内，按本地日期窗口取数。
+
+    使用显式 start_date / end_date 避开数据库 `now()` 与本地时钟的差异，
+    保证覆盖「最近 60 天」窗口。
+    """
+    today = date.today()
+    start = today - timedelta(days=60)
+    df = get_cached_data(
+        start_date=start.isoformat(),
+        end_date=today.isoformat(),
+        signal_name_prefix=BC_XD4_PREFIX,
+    )
     if df.empty:
         return df
     if "signal_date" in df.columns:
@@ -273,26 +285,61 @@ def page_signal_bc_xd4() -> None:
 """)
     st.divider()
 
-    df_full = _load_bc_xd4_signals(days=45)
+    df_full = _load_bc_xd4_signals()
 
     # 日期范围选择
     if not df_full.empty and "signal_date" in df_full.columns:
-        min_date = df_full["signal_date"].dt.date.min()
-        max_date = df_full["signal_date"].dt.date.max()
+        data_max_date = df_full["signal_date"].dt.date.max()
+        today = date.today()
+        window_end = min(data_max_date, today)
+        window_start = window_end - timedelta(days=60)
+
         unique_dates = sorted(df_full["signal_date"].dt.date.unique(), reverse=True)
-        default_start = unique_dates[min(4, len(unique_dates) - 1)] if unique_dates else min_date
+        default_start = unique_dates[min(4, len(unique_dates) - 1)] if unique_dates else window_end
+        default_start = max(default_start, window_start)
 
         date_range = st.slider(
-            "选择信号日期范围",
-            min_value=min_date,
-            max_value=max_date,
-            value=(default_start, max_date),
+            "选择信号日期范围（最近 60 天）",
+            min_value=window_start,
+            max_value=window_end,
+            value=(default_start, window_end),
             format="YYYY-MM-DD",
         )
         df_full = _filter_by_date_range(df_full, date_range[0], date_range[1])
         st.info(f"📅 显示 {date_range[0]} 至 {date_range[1]} 的 bc_xd4 信号。")
     else:
         st.warning("暂无 bc_xd4 信号数据。")
+
+    # 每日出现该页面信号的 symbol 个数（按 exchange 分线）
+    if (
+        not df_full.empty
+        and "signal_date" in df_full.columns
+        and "symbol" in df_full.columns
+        and "exchange" in df_full.columns
+    ):
+        daily_symbols = (
+            df_full.assign(_date=df_full["signal_date"].dt.normalize())
+            .groupby(["_date", "exchange"])["symbol"]
+            .nunique()
+            .reset_index(name="symbol_count")
+        )
+        pivot_df = (
+            daily_symbols.pivot(
+                index="_date", columns="exchange", values="symbol_count"
+            )
+            .fillna(0)
+            .sort_index()
+        )
+        # 用所选日期范围补齐缺失日期（缺失填 0），保证横轴连续覆盖
+        full_range = pd.date_range(
+            start=pd.Timestamp(date_range[0]), end=pd.Timestamp(date_range[1]),
+            freq="D",
+        )
+        pivot_df = pivot_df.reindex(full_range).fillna(0)
+        # 横坐标只显示日期（YYYY-MM-DD），避免 datetime 自动展示星期
+        pivot_df.index = pivot_df.index.strftime("%Y-%m-%d")
+        st.write("**每日出现信号的 symbol 个数（按 exchange）：**")
+        st.line_chart(pivot_df)
 
     # 概览指标
     if not df_full.empty:

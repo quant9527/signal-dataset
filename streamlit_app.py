@@ -1,4 +1,4 @@
-"""Streamlit entrypoint: registers 8 sections / 24 pages under app_pages/.
+"""Streamlit entrypoint: registers 8 sections / 26 pages under app_pages/.
 
 Each page is registered as an `st.Page` with a unique `url_path`, so the
 app uses Streamlit's path-based multipage navigation (`st.navigation`).
@@ -47,7 +47,7 @@ pages: dict[str, list[st.StreamlitPage]] = {
         st.Page(page_dashboard_binance, title="Binance", icon="🪙",  url_path="dashboard_binance"),
         st.Page(page_dashboard_em,      title="EM",      icon="🌍", url_path="dashboard_em"),
     ],
-    "AS": [
+    "AS 模式": [
         st.Page(page_today_opportunities, title="今日机会", icon="🎯",
                 url_path="today_opportunities", default=True),
         st.Page(page_review_index,            title="大盘",     icon="📈", url_path="review_index"),
@@ -58,6 +58,10 @@ pages: dict[str, list[st.StreamlitPage]] = {
         st.Page(page_profit_pattern_cl3b_zsx, title="CL3B ZSX",  icon="📈",
                 url_path="profit_pattern_cl3b_zsx"),
         st.Page(page_main_then_yd,            title="主→yd",      icon="🔗", url_path="main_then_yd"),
+        st.Page(page_signal_cl2b_pair, title="CL2B Pair", icon="🔎",
+                url_path="signal_cl2b_pair"),
+        st.Page(page_signal_bc_xd4, title="BC XD4", icon="📉",
+                url_path="signal_bc_xd4"),
     ],
     "K线": [
         st.Page(page_kline_fullscreen, title="K线", icon="🕯️", url_path="kline"),
@@ -84,12 +88,6 @@ pages: dict[str, list[st.StreamlitPage]] = {
                 url_path="sector_signals"),
         st.Page(page_search_signals,         title="Search Signals",        icon="🔍",
                 url_path="search_signals"),
-    ],
-    "AS 模式": [
-        st.Page(page_signal_cl2b_pair, title="CL2B Pair", icon="🔎",
-                url_path="signal_cl2b_pair"),
-        st.Page(page_signal_bc_xd4, title="BC XD4", icon="📉",
-                url_path="signal_bc_xd4"),
     ],
     "Tools": [
         st.Page(page_instrument_groups, title="Instrument Groups", icon="📁",

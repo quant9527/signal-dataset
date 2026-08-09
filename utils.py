@@ -1,13 +1,42 @@
 from typing import Any
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+
+from constants import KLINE_DEFAULT_FREQ
+from symbol_picker import encode_symbol_token
 
 
 # ============================================================================
 # 周期排序（从大到小）
 # ============================================================================
 FREQ_ORDER = ['1M', '1w', '1d', '2h', '1h', '30m', '15m', '5m', '1m']
+
+
+# ============================================================================
+# K 线入口 URL 生成
+# ============================================================================
+def build_kline_link_url(
+    exchange: str | None,
+    symbol: str | None,
+    freq: str | None = KLINE_DEFAULT_FREQ,
+) -> str:
+    """构造指向 K 线页的相对 URL: ``/kline?symbol=<token>``。
+
+    复用 :func:`symbol_picker.encode_symbol_token` 编码 token；
+    exchange 或 symbol 缺失或为 ``(No Exchange)`` / ``(No Symbol)`` 占位符时
+    返回空串（不生成可点击链接）。
+    """
+    ex = str(exchange or "").strip().lower()
+    sym = str(symbol or "").strip()
+    if not ex or not sym:
+        return ""
+    if ex.casefold() == "(no exchange)" or sym.casefold() == "(no symbol)":
+        return ""
+    token = encode_symbol_token(ex, sym, freq)
+    return f"/kline?symbol={quote(token, safe=':')}"
+
 
 def sort_freqs(freqs: list[str]) -> list[str]:
     """
@@ -79,41 +108,45 @@ def display_signals_compact(
     include_freq: bool = True,
     height: int = 600,
     title: str = None,
+    link_freq: str | None = None,
 ) -> None:
     """
     以 Compact 模式显示信号数据
-    
+
     Args:
         df: 信号数据 DataFrame
         group_by_cols: 分组依据的列
         include_freq: 是否在 signal_info 中包含 freq
         height: dataframe 显示高度
         title: 可选的标题，显示在数据表上方
+        link_freq: 用于生成每行 K 线入口 URL 的周期；为 None 时不渲染 K 线列。
+            复用 :func:`symbol_picker.encode_symbol_token`，目标路由
+            ``/kline?symbol=exchange:symbol:freq``。
     """
     if df.empty:
         st.info("暂无数据")
         return
-    
+
     # 填充空值
     df_filled = df.copy()
     df_filled['exchange'] = df_filled['exchange'].replace('', pd.NA).fillna('(No Exchange)')
     df_filled['symbol'] = df_filled['symbol'].replace('', pd.NA).fillna('(No Symbol)')
     if 'signal_name' in group_by_cols:
         df_filled['signal_name'] = df_filled['signal_name'].replace('', pd.NA).fillna('(No Signal)')
-    
+
     # 创建组合显示字段：exchange:symbol-symbol_name (如 as:000001-平安银行)
     if 'symbol' in df_filled.columns and 'symbol_name' in df_filled.columns:
         df_filled['_display_symbol'] = df_filled.apply(
-            lambda row: f"{row['exchange']}:{row['symbol']}-{row['symbol_name']}" 
-                if pd.notna(row['symbol_name']) and row['symbol_name'] 
-                else f"{row['exchange']}:{row['symbol']}", 
+            lambda row: f"{row['exchange']}:{row['symbol']}-{row['symbol_name']}"
+                if pd.notna(row['symbol_name']) and row['symbol_name']
+                else f"{row['exchange']}:{row['symbol']}",
             axis=1
         )
-    
+
     # 构建 signal_info 内容
     # 如果 signal_name 不在分组列中，需要在每行显示 signal_name
     include_signal_name = 'signal_name' not in group_by_cols
-    
+
     def build_signal_info(group):
         lines = []
         for _, row in group.iterrows():
@@ -131,37 +164,81 @@ def display_signals_compact(
                 parts.append(f"Score: {row['score'] if pd.notna(row.get('score')) else 'N/A'}")
             lines.append(' | '.join(parts))
         return '\n'.join(lines)
-    
+
     # 分组聚合
     df_sorted = df_filled.sort_values('signal_date', ascending=False)
-    
+
     # 使用 agg 替代 apply，更稳定
     grouped_df = df_sorted.groupby(group_by_cols, as_index=False).agg(
         symbol_name=('symbol_name', 'first'),
         count=('symbol', 'size'),
         _latest_date=('signal_date', 'max'),
     )
-    
+
+    # 构建每行 K 线入口 URL（复用 symbol_picker.encode_symbol_token）
+    if {'exchange', 'symbol'}.issubset(grouped_df.columns):
+        if link_freq is not None:
+            grouped_df['_kline_url'] = grouped_df.apply(
+                lambda r: build_kline_link_url(r['exchange'], r['symbol'], link_freq),
+                axis=1,
+            )
+        else:
+            # 每行使用该分组中最新一条信号的 freq；无效或缺失时退回默认。
+            if 'freq' in df_sorted.columns:
+                latest_freq = (
+                    df_sorted.sort_values('signal_date', ascending=False)
+                    .dropna(subset=['freq'])
+                    .drop_duplicates(subset=group_by_cols, keep='first')
+                    .set_index(group_by_cols)['freq']
+                )
+            else:
+                latest_freq = pd.Series(dtype=object)
+
+            def _lookup(row: pd.Series) -> str | None:
+                key = tuple(row[c] for c in group_by_cols)
+                if key in latest_freq.index:
+                    val = latest_freq.loc[key]
+                    if isinstance(val, pd.Series):
+                        val = val.iloc[0]
+                    return val
+                return None
+
+            row_freqs: list[str | None] = [
+                _lookup(row) for _, row in grouped_df.iterrows()
+            ]
+            grouped_df = grouped_df.assign(_row_freq=row_freqs)
+
+            def _row_url(r: pd.Series) -> str:
+                freq_val = r.get('_row_freq')
+                if freq_val is None or (isinstance(freq_val, float) and pd.isna(freq_val)):
+                    freq_val = KLINE_DEFAULT_FREQ
+                return build_kline_link_url(r['exchange'], r['symbol'], freq_val)
+
+            grouped_df['_kline_url'] = grouped_df.apply(_row_url, axis=1)
+            grouped_df = grouped_df.drop(columns=['_row_freq'])
+    else:
+        grouped_df['_kline_url'] = ''
+
     # 单独计算 signal_info（需要访问多列）
     signal_info_dict = {}
     for keys, group in df_sorted.groupby(group_by_cols):
         key = keys if isinstance(keys, tuple) else (keys,)
         signal_info_dict[key] = build_signal_info(group)
-    
+
     # 将 signal_info 合并到 grouped_df
     grouped_df['signal_info'] = grouped_df.apply(
         lambda row: signal_info_dict.get(tuple(row[col] for col in group_by_cols), ''),
         axis=1
     )
-    
+
     # 按最新信号时间降序排序
     grouped_df = grouped_df.sort_values('_latest_date', ascending=False)
-    
+
     # 检查是否为空
     if grouped_df.empty:
         st.warning("分组后数据为空")
         return
-    
+
     # 确定显示列
     if '_display_symbol' in df_filled.columns:
         # 合并 _display_symbol
@@ -176,21 +253,36 @@ def display_signals_compact(
         for col in group_by_cols:
             if col not in ['exchange', 'symbol']:  # 跳过已合并的列
                 column_order.append(col)
-        column_order.extend(['count', 'signal_info'])
+        column_order.extend(['count', 'signal_info', '_kline_url'])
     else:
-        column_order = group_by_cols + ['symbol_name', 'count', 'signal_info']
-    
+        column_order = group_by_cols + ['symbol_name', 'count', 'signal_info', '_kline_url']
+
     available_cols = [c for c in column_order if c in grouped_df.columns]
-    
+
+    # 配置 K 线入口列（LinkColumn）：当至少有一行存在有效 URL 时启用。
+    # Streamlit 1.59 的 LinkColumn 没有 url_col 参数；这里把 URL 直接放在数据列
+    # 自身（该列已是字符串），并通过 display_text 渲染为可点击的固定文字。
+    column_config: dict[str, Any] | None = None
+    if (grouped_df['_kline_url'] != '').any():
+        column_config = {
+            '_kline_url': st.column_config.LinkColumn(
+                '📈 K线',
+                display_text='K线 →',
+                help='打开对应 K 线页（/kline?symbol=...）',
+                width='small',
+            ),
+        }
+
     # 显示标题
     if title:
         st.write(title)
-    
+
     st.dataframe(
         grouped_df[available_cols],
         height=height,
         width='stretch',
-        hide_index=True
+        hide_index=True,
+        column_config=column_config,
     )
 
 
@@ -264,6 +356,7 @@ def display_signals_multiview(
                     group_by_cols=['exchange', 'symbol', 'signal_name'],
                     include_freq=False,
                     height=height,
+                    link_freq=freq,
                 )
 
 
