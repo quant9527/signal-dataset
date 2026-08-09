@@ -2,7 +2,7 @@
 可复用的多交易所 Symbol 选择器组件。
 
 提供四个函数：
-- symbol_picker_add_ui — 交易所 + 可搜索代码下拉 + 添加按钮
+- symbol_picker_add_ui — 交易所 + 可搜索代码下拉（选中即自动添加，无需额外按钮）
 - symbol_quick_add_ui — 渲染常用标的 pills，点击直接添加（如 asindex:sh000300）
 - symbol_picker_selected_ui — 已选标的（exchange:symbol）展示 + 点击取消删除
 - symbol_tokens_selected_ui — 已选编码 token（如 as:000001:1d）展示 + 点击取消删除
@@ -84,17 +84,20 @@ def _instruments_for_exchange(exchange: str) -> pd.DataFrame:
 
 def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
     """
-    Render exchange selector + searchable symbol dropdown + add button in one row.
+    Render exchange selector + searchable symbol dropdown in one row.
 
     下拉选项包含「代码  名称  [别名]」，alias 中包含拼音首字母，
     Streamlit 自带搜索可直接匹配（如输入"jfy"找到"减肥药"）。
 
+    选中下拉项即视为「添加」，无需再点额外按钮；首次加载时返回 None，
+    避免空跑把当前已选标的意外重复添加。
+
     Returns
     -------
     (exchange, symbol) | None
-        点「＋ 添加」时返回 (exchange, symbol)，否则返回 None。
+        用户新选了一个 symbol 时返回 (exchange, symbol)；否则返回 None。
     """
-    c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="bottom")
+    c1, c2 = st.columns([1, 3], vertical_alignment="bottom")
     with c1:
         exchange_options = list(KLINE_EXCHANGE_SELECT_OPTIONS)
         a_exchange: str = st.selectbox(
@@ -108,6 +111,9 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
 
     is_as_all = a_exchange == EXCHANGE_AS_ALL
     add_inst = _instruments_for_exchange(a_exchange)
+    # 占位 sentinel：让 selectbox 默认指向它而非真实标的，避免打开页面
+    # 就把 "000001 平安银行" 之类排第一的项当作"已选"。
+    PLACEHOLDER = "__placeholder__"
     with c2:
         if not add_inst.empty:
             if is_as_all:
@@ -143,6 +149,8 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
                             alias_map[key] = "_".join(extra)
 
             def _fmt(s: str) -> str:
+                if s == PLACEHOLDER:
+                    return "— 请选择代码 —"
                 ex_part = ""
                 sym_part = s
                 if display_prefix:
@@ -160,7 +168,7 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
 
             a_symbol: str = st.selectbox(
                 "代码",
-                options=sym_list,
+                options=[PLACEHOLDER, *sym_list],
                 format_func=_fmt,
                 key=f"{key_prefix}_symbol_select",
                 label_visibility="collapsed",
@@ -174,25 +182,38 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
                 label_visibility="collapsed",
             )
 
-    with c3:
-        add_clicked = st.button("添加", key=f"{key_prefix}_add", width="stretch")
+    raw_val = str(a_symbol).strip()
 
-    if add_clicked:
-        raw_val = str(a_symbol).strip()
-        if not raw_val:
-            return None
-        if is_as_all:
-            if ":" in raw_val:
-                ex, sym = raw_val.split(":", 1)
-                ex = ex.strip().lower()
-                if ex in AS_ALL_EXCHANGES:
-                    sym_val = _clean_symbol_code(sym.strip())
-                    if sym_val:
-                        return (ex, sym_val)
-            return None
-        sym_val = _clean_symbol_code(raw_val)
-        if sym_val:
-            return (a_exchange, sym_val)
+    # 与上一次「已确认添加」的值比对：变化即视为新选。
+    # 占位符 / 空值同样要写入 confirmed_value，避免下次「从占位→真值」
+    # 被误判成"首次加载"而不触发添加。
+    confirm_key = f"{key_prefix}_confirmed_value"
+    prev = st.session_state.get(confirm_key)
+    if prev is None:
+        st.session_state[confirm_key] = raw_val
+        return None
+
+    if raw_val == prev:
+        return None
+
+    # 占位符 / 空值都不视为新选
+    if not raw_val or raw_val == PLACEHOLDER:
+        st.session_state[confirm_key] = raw_val
+        return None
+
+    st.session_state[confirm_key] = raw_val
+    if is_as_all:
+        if ":" in raw_val:
+            ex, sym = raw_val.split(":", 1)
+            ex = ex.strip().lower()
+            if ex in AS_ALL_EXCHANGES:
+                sym_val = _clean_symbol_code(sym.strip())
+                if sym_val:
+                    return (ex, sym_val)
+        return None
+    sym_val = _clean_symbol_code(raw_val)
+    if sym_val:
+        return (a_exchange, sym_val)
     return None
 
 

@@ -69,30 +69,63 @@ def test_exchange_defaults_to_as_all(at):
     assert exchange.value == "as_all"
 
 
+def test_symbol_defaults_to_placeholder(at):
+    """首次加载时 selectbox 默认是占位项，而不是按字典序排第一的真实标的。"""
+    at.run()
+
+    sym = at.selectbox(key="test_picker_symbol_select")
+    assert sym.value == "__placeholder__"
+
+
+def test_first_load_does_not_emit_picker_result(at):
+    """首次加载默认是占位项，不应触发任何 (exchange, symbol) 返回。"""
+    at.run()
+
+    assert "picker_result" not in at.session_state
+
+
+def test_placeholder_options_come_before_real_symbols(at):
+    at.run()
+
+    # AppTest 渲染后的 options 是 format_func 处理过的展示文本
+    options = at.selectbox(key="test_picker_symbol_select").options
+    assert options[0] == "— 请选择代码 —"
+    # 真实标的按字母序排列
+    assert options[1:] == [
+        "as:600519_贵州茅台_gzmt",
+        "asindex:sh000300_沪深300_hs300",
+        "ths:600519_贵州茅台同花顺_gzmt_ths",
+    ]
+
+
 def test_as_all_add_returns_real_exchange(at):
     at.run()
     at.selectbox(key="test_picker_exchange").set_value("as_all")
     at.run()
 
     options = at.selectbox(key="test_picker_symbol_select").options
-    assert [option.split("_", 1)[0] for option in options] == [
-        "as:600519",
-        "asindex:sh000300",
-        "ths:600519",
-    ]
-    at.selectbox(key="test_picker_symbol_select").set_value("as:600519")
-    at.button(key="test_picker_add").click().run()
+    assert options[0] == "— 请选择代码 —"
+    # 选一个真实的 symbol，触发添加
+    at.selectbox(key="test_picker_symbol_select").set_value("ths:600519")
+    at.run()
 
-    assert at.session_state["picker_result"] == ("as", "600519")
+    assert at.session_state["picker_result"] == ("ths", "600519")
     assert "as_all" not in repr(at.session_state["picker_result"])
 
 
 def test_real_exchange_selection_returns_same_exchange(at):
+    # 首次 run：默认占位项；不触发添加
     at.run()
+    assert "picker_result" not in at.session_state
+
+    # 用户切到 ths：默认仍是占位项，依然不触发添加（避免切换交易所就意外添加）
     at.selectbox(key="test_picker_exchange").set_value("ths")
     at.run()
+    assert "picker_result" not in at.session_state
+
+    # 用户在 ths 下选 600519：触发添加
     at.selectbox(key="test_picker_symbol_select").set_value("600519")
-    at.button(key="test_picker_add").click().run()
+    at.run()
 
     assert at.session_state["picker_result"] == ("ths", "600519")
 
