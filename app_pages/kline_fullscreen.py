@@ -381,7 +381,9 @@ def page_kline_fullscreen() -> None:
                     ):
                         removed_idx = i
             with c_freq:
-                pills_key = f"kfs_freq_pills_{e.exchange}_{_widget_key_safe(e.symbol)}"
+                # 同一只标的可能以不同频率同时出现（如 as:002827:1h 与 as:002827:1d），
+                # key 必须包含列表索引才能唯一。
+                pills_key = f"kfs_freq_pills_{i}_{e.exchange}_{_widget_key_safe(e.symbol)}"
                 new_freq = st.pills(
                     f"周期_{i}",
                     options=list(KLINE_FREQ_OPTIONS),

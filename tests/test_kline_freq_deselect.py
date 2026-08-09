@@ -119,7 +119,7 @@ def _is_all_hidden(symbol_qs: str) -> bool:
 
 def test_deselect_first_symbol_hides_chart(at):
     at.run()
-    _set_freq(at, "kfs_freq_pills_as_000001", None)
+    _set_freq(at, "kfs_freq_pills_0_as_000001", None)
     at.run()
 
     assert _qp_value(at, "symbol") == "as:000001,ths:600519:1h"
@@ -130,9 +130,9 @@ def test_deselect_first_symbol_hides_chart(at):
 
 def test_reselect_period_restores_chart(at):
     at.run()
-    _set_freq(at, "kfs_freq_pills_as_000001", None)
+    _set_freq(at, "kfs_freq_pills_0_as_000001", None)
     at.run()
-    _set_freq(at, "kfs_freq_pills_as_000001", "1h")
+    _set_freq(at, "kfs_freq_pills_0_as_000001", "1h")
     at.run()
 
     assert "as:000001:1h" in _qp_value(at, "symbol")
@@ -142,9 +142,9 @@ def test_reselect_period_restores_chart(at):
 
 def test_all_hidden_shows_info_and_stops(at):
     at.run()
-    _set_freq(at, "kfs_freq_pills_as_000001", None)
+    _set_freq(at, "kfs_freq_pills_0_as_000001", None)
     at.run()
-    _set_freq(at, "kfs_freq_pills_ths_600519", None)
+    _set_freq(at, "kfs_freq_pills_1_ths_600519", None)
     at.run()
 
     assert _qp_value(at, "symbol") == "as:000001,ths:600519"
@@ -160,12 +160,12 @@ def test_remove_front_entry_preserves_hidden_state(at):
     at.query_params["symbol"] = "as:000001:1d,ths:600519"
     at.run()
     # 后置 entry 初始为 hidden
-    assert at.pills(key="kfs_freq_pills_ths_600519").value is None
+    assert at.pills(key="kfs_freq_pills_1_ths_600519").value is None
 
     at.button(key="kfs_rm_0").click().run()
 
     assert _qp_value(at, "symbol") == "ths:600519"
-    assert at.pills(key="kfs_freq_pills_ths_600519").value is None
+    assert at.pills(key="kfs_freq_pills_0_ths_600519").value is None
     info_texts = [i.value for i in at.info]
     assert any("所有标的均已隐藏" in t for t in info_texts)
 
@@ -182,3 +182,26 @@ def test_quick_add_with_first_hidden_uses_default_freq(at):
     # 新添加的标的应参与 Flight 请求
     last_tags = _last_tags(at)
     assert any("asindex_sh000300_1d" in tag for tag in last_tags)
+
+
+def test_same_symbol_multiple_freqs_no_duplicate_key(tmp_path):
+    """同一只标的以不同频率同时出现时，不应触发 StreamlitDuplicateElementKey。"""
+    runner = tmp_path / "kline_same_symbol_runner.py"
+    runner.write_text(RUNNER_TEMPLATE)
+    app = AppTest.from_file(str(runner))
+    app.query_params["symbol"] = "as:000001:1d,as:000001:1h"
+    app.query_params["start"] = "2025-01-01"
+    app.query_params["end"] = "2025-01-10"
+    app.query_params["all_signals"] = "0"
+
+    app.run()
+    # 不应存在 exception（修复前会抛 StreamlitDuplicateElementKey）
+    assert not app.exception
+    # 应发起 Flight 请求，分别覆盖 1d 与 1h（分组调用可能有多个记录）
+    try:
+        recorded = app.session_state["recorded_tags"]
+    except KeyError:
+        recorded = []
+    all_tags = [tag for rec in recorded for tag in rec[0]]
+    assert any("as_000001_1d" in tag for tag in all_tags)
+    assert any("as_000001_1h" in tag for tag in all_tags)
