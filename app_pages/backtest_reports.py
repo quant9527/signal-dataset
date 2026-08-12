@@ -12,10 +12,15 @@
 """
 from __future__ import annotations
 
+import gc
+import json
 import os
 import pickle
 import re
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -25,6 +30,13 @@ import streamlit as st
 QUANT_LAB_FILES = os.environ.get(
     "QUANT_LAB_FILES_DIR", "/home/lei/repo/quant-lab/files"
 )
+
+# 索引文件：缓存每个 pkl 的元信息，避免每次反序列化 4GB+ 大文件
+_INDEX_BASENAME: str = ".signalview_report_index.json"
+_INDEX_VERSION: int = 1
+
+# 超过此大小的 pkl 在独立子进程中反序列化，避免主进程 OOM
+_SUBPROCESS_SIZE_THRESHOLD_MB: int = 500
 
 
 def _parse_filename_dt(filename: str) -> datetime | None:
@@ -141,49 +153,206 @@ def _summary_row(filename: str, pkl_path: str) -> dict[str, Any] | None:
     }
 
 
-def _scan_cache_key() -> tuple[float, tuple[str, ...]]:
-    """计算扫描缓存键：(dir_mtime, sorted(pkl_names))。
+# 子进程加载脚本：大文件在独立 Python 进程中反序列化，避免主进程 OOM
+_SIGNALVIEW_ROOT = str(Path(__file__).resolve().parents[1])
 
-    当目录 mtime 变化或 pkl 文件名集合变化时（新增 / 删除 / 重命名），
-    哈希值变化触发 st.cache_data 失效。
+_SUBPROCESS_LOAD_SCRIPT = """
+import json, sys
+sys.path.insert(0, {root!r})
+from app_pages.backtest_reports import _summary_row
+filename = sys.argv[1]
+pkl_path = sys.argv[2]
+row = _summary_row(filename, pkl_path)
+print(json.dumps(row, default=lambda o: o.isoformat() if hasattr(o, \"isoformat\") else str(o)))
+"""
+
+
+def _summary_row_in_subprocess(filename: str, pkl_path: str) -> dict[str, Any] | None:
+    """在独立子进程中加载大 pkl 并提取元信息。
+
+    子进程退出后其占用的内存会被操作系统回收，适合 500MB+ 的大文件，
+    避免主进程同时驻留多个反序列化后的巨大对象。
+    """
+    script = _SUBPROCESS_LOAD_SCRIPT.format(root=_SIGNALVIEW_ROOT)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script, filename, pkl_path],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode != 0:
+            return None
+        row = json.loads(proc.stdout)
+        if row is None:
+            return None
+        if row.get("created_at"):
+            row["created_at"] = datetime.fromisoformat(row["created_at"])
+        return row
+    except Exception:
+        return None
+
+
+# ---------- 索引：避免每次反序列化大 pkl ----------
+
+def _index_path() -> str:
+    return os.path.join(QUANT_LAB_FILES, _INDEX_BASENAME)
+
+
+def _json_default(obj: Any) -> Any:
+    """datetime 等对象在写入 JSON 索引前的序列化钩子。"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _json_object_hook(d: dict[str, Any]) -> dict[str, Any]:
+    """读取 JSON 索引时，把 ISO 格式时间戳还原为 datetime。"""
+    if "created_at" in d and isinstance(d["created_at"], str):
+        try:
+            d["created_at"] = datetime.fromisoformat(d["created_at"])
+        except ValueError:
+            pass
+    return d
+
+
+def _load_index() -> dict[str, Any]:
+    """读取索引文件；不存在或版本不符时返回空索引。"""
+    path = _index_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            idx = json.load(f, object_hook=_json_object_hook)
+    except Exception:
+        return {"version": _INDEX_VERSION, "entries": {}}
+    if idx.get("version") != _INDEX_VERSION:
+        return {"version": _INDEX_VERSION, "entries": {}}
+    return idx
+
+
+def _save_index(idx: dict[str, Any]) -> None:
+    """原子写索引文件。"""
+    path = _index_path()
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(idx, f, ensure_ascii=False, default=_json_default)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _file_identity(path: str) -> tuple[float, int] | None:
+    """返回文件 (mtime, size)，用于判断 pkl 是否被替换。"""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+def _build_index_incrementally(pkl_names: tuple[str, ...]) -> list[dict[str, Any]]:
+    """基于现有索引增量更新，返回当前所有有效 pkl 的 summary rows。
+
+    只加载新增或 mtime/size 变化的文件；已索引且未变化的文件直接复用缓存行。
+    """
+    idx = _load_index()
+    entries: dict[str, Any] = idx.get("entries", {})
+    current_names = set(pkl_names)
+
+    # 清理已删除的文件条目
+    for fname in list(entries.keys()):
+        if fname not in current_names:
+            del entries[fname]
+
+    rows: list[dict[str, Any]] = []
+    for fname in pkl_names:
+        pkl_path = os.path.join(QUANT_LAB_FILES, fname)
+        identity = _file_identity(pkl_path)
+        if identity is None:
+            entries.pop(fname, None)
+            continue
+
+        mtime, size = identity
+        cached = entries.get(fname)
+        if cached and cached.get("mtime") == mtime and cached.get("size") == size:
+            row = cached.get("row")
+        else:
+            # 大文件在子进程中加载，避免主进程 OOM
+            if size > _SUBPROCESS_SIZE_THRESHOLD_MB * 1024 * 1024:
+                row = _summary_row_in_subprocess(fname, pkl_path)
+            else:
+                row = _summary_row(fname, pkl_path)
+            if row is not None:
+                entries[fname] = {
+                    "mtime": mtime,
+                    "size": size,
+                    "row": row,
+                }
+            else:
+                entries.pop(fname, None)
+                continue
+
+        if row is not None:
+            rows.append(row)
+
+        # 大 pkl 反序列化后及时回收内存，避免多个 4GB+ 文件同时驻留
+        gc.collect()
+
+    _save_index(idx)
+    return rows
+
+
+def _scan_cache_key() -> tuple[tuple[str, float, int], ...]:
+    """计算扫描缓存键：每个 pkl 的 (name, mtime, size) 元组。
+
+    比目录 mtime 更精确：新增 / 删除 / 替换 / 修改任一 pkl 都会改变 key，
+    触发 st.cache_data 失效；同时避免目录 mtime 在极短时间内未更新的问题。
     """
     if not os.path.isdir(QUANT_LAB_FILES):
-        return (0.0, ())
-    try:
-        dir_mtime = os.stat(QUANT_LAB_FILES).st_mtime
-    except OSError:
-        dir_mtime = 0.0
-    pkl_names = tuple(
-        sorted(
-            f for f in os.listdir(QUANT_LAB_FILES) if f.endswith(".pkl")
-        )
-    )
-    return (dir_mtime, pkl_names)
+        return ()
+    entries: list[tuple[str, float, int]] = []
+    for fname in sorted(os.listdir(QUANT_LAB_FILES)):
+        if not fname.endswith(".pkl"):
+            continue
+        pkl_path = os.path.join(QUANT_LAB_FILES, fname)
+        try:
+            st = os.stat(pkl_path)
+            entries.append((fname, st.st_mtime, st.st_size))
+        except OSError:
+            entries.append((fname, 0.0, 0))
+    return tuple(entries)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _list_reports_cached(_key: tuple) -> pd.DataFrame:
+def _list_reports_cached(key: tuple[tuple[str, float, int], ...]) -> pd.DataFrame:
     """list_reports 的缓存实现。参数 hash 变化时缓存失效。"""
-    _dir_mtime, pkl_names = _key
-    rows = []
-    for fname in pkl_names:
-        pkl_path = os.path.join(QUANT_LAB_FILES, fname)
-        row = _summary_row(fname, pkl_path)
-        if row is not None:
-            rows.append(row)
+    pkl_names = tuple(entry[0] for entry in key)
+    rows = _build_index_incrementally(pkl_names)
     df = pd.DataFrame(rows)
     if not df.empty and "created_at" in df.columns:
         df = df.sort_values("created_at", ascending=False)
     return df
 
 
-def list_reports() -> pd.DataFrame:
+def list_reports(force_rebuild: bool = False) -> pd.DataFrame:
     """扫描 quant-lab/files/*.pkl，返回列表 DataFrame（30s 缓存 + mtime 失效）。
 
     缓存策略：30s TTL + 入参为 (dir_mtime, sorted(pkl_names))。新增 / 删除 /
     替换 pkl 文件会改变入参 hash，缓存自动失效。30s TTL 兜底防止目录外
     文件被替换但 mtime 不变的场景。
+
+    性能：通过 ``.signalview_report_index.json`` 缓存每个 pkl 的元信息，
+    避免每次反序列化大文件。当 pkl mtime/size 不变时直接复用索引。
     """
+    if force_rebuild:
+        _save_index({"version": _INDEX_VERSION, "entries": {}})
+        _list_reports_cached.clear()
     return _list_reports_cached(_scan_cache_key())
 
 
@@ -292,7 +461,9 @@ def page_backtest_reports() -> None:
     if st.button("🔄 刷新列表", width="content"):
         st.rerun()
 
-    df = list_reports()
+    force_rebuild = st.button("🔄 重建索引", width="content", help="当索引损坏或需要强制重新扫描所有 pkl 时使用。大文件较多时可能需要一些时间。")
+
+    df = list_reports(force_rebuild=force_rebuild)
     if df.empty:
         st.info("暂无报告。在 quant-lab 中运行回测后会自动出现在这里。")
         st.stop()

@@ -171,6 +171,106 @@ def test_freq_str_extraction(fake_files_dir):
     assert df.iloc[0]["freqs"] == "1d,1h"
 
 
+# ---------- 索引（_build_index_incrementally / force_rebuild） ----------
+
+class TestReportIndex:
+    def test_index_created_after_list_reports(self, fake_files_dir):
+        _make_dummy_pkl(fake_files_dir / "20260805_100000_alpha.pkl", n_signals=1)
+        br.list_reports()
+        idx_path = fake_files_dir / br._INDEX_BASENAME
+        assert idx_path.exists()
+        idx = br._load_index()
+        assert idx.get("version") == br._INDEX_VERSION
+        assert "20260805_100000_alpha.pkl" in idx["entries"]
+
+    def test_index_reuses_cached_row_without_reloading_pkl(self, fake_files_dir, monkeypatch):
+        """索引命中时应直接复用缓存行，不再调用 _safe_load_pickle。"""
+        pkl = fake_files_dir / "20260805_100000_alpha.pkl"
+        _make_dummy_pkl(pkl, n_signals=1)
+        br.list_reports()
+
+        calls = []
+        original = br._safe_load_pickle
+        def spy(path):
+            calls.append(path)
+            return original(path)
+        monkeypatch.setattr(br, "_safe_load_pickle", spy)
+
+        df = br.list_reports()
+        assert len(df) == 1
+        assert len(calls) == 0, "索引未变化时不应重新加载 pkl"
+
+    def test_index_increments_on_new_file(self, fake_files_dir):
+        _make_dummy_pkl(fake_files_dir / "20260805_100000_alpha.pkl")
+        br.list_reports()
+
+        _make_dummy_pkl(fake_files_dir / "20260804_100000_beta.pkl", n_signals=1)
+        df = br.list_reports()
+        assert len(df) == 2
+        idx = br._load_index()
+        assert set(idx["entries"].keys()) == {
+            "20260805_100000_alpha.pkl",
+            "20260804_100000_beta.pkl",
+        }
+
+    def test_index_removes_deleted_file(self, fake_files_dir):
+        pkl = fake_files_dir / "20260805_100000_alpha.pkl"
+        _make_dummy_pkl(pkl)
+        br.list_reports()
+        pkl.unlink()
+        df = br.list_reports()
+        assert df.empty
+        idx = br._load_index()
+        assert "20260805_100000_alpha.pkl" not in idx["entries"]
+
+    def test_index_invalidates_when_file_changed(self, fake_files_dir):
+        pkl = fake_files_dir / "20260805_100000_alpha.pkl"
+        _make_dummy_pkl(pkl, n_signals=0)
+        br.list_reports()
+
+        # 替换为含有信号的新版本
+        _make_dummy_pkl(pkl, n_signals=1)
+        df = br.list_reports()
+        assert df.iloc[0]["n_signals"] == 1
+
+    def test_force_rebuild_clears_index(self, fake_files_dir):
+        _make_dummy_pkl(fake_files_dir / "20260805_100000_alpha.pkl")
+        br.list_reports()
+        idx = br._load_index()
+        assert "20260805_100000_alpha.pkl" in idx["entries"]
+
+        df = br.list_reports(force_rebuild=True)
+        assert len(df) == 1
+        idx = br._load_index()
+        assert "20260805_100000_alpha.pkl" in idx["entries"]
+
+    def test_index_corrupted_file_rebuilds_gracefully(self, fake_files_dir):
+        _make_dummy_pkl(fake_files_dir / "20260805_100000_alpha.pkl")
+        br.list_reports()
+        # 破坏索引文件
+        idx_path = fake_files_dir / br._INDEX_BASENAME
+        idx_path.write_text("not json", encoding="utf-8")
+        df = br.list_reports()
+        assert len(df) == 1
+        assert df.iloc[0]["pick_id"] == "alpha"
+
+
+class TestSubprocessLoad:
+    """大文件子进程加载，避免主进程 OOM。"""
+
+    def test_summary_row_in_subprocess(self, fake_files_dir):
+        """子进程加载应返回与主进程一致的元信息。"""
+        pkl = fake_files_dir / "20260805_100000_alpha.pkl"
+        _make_dummy_pkl(pkl, n_signals=1)
+        row_sub = br._summary_row_in_subprocess(pkl.name, str(pkl))
+        row_main = br._summary_row(pkl.name, str(pkl))
+        assert row_sub is not None
+        assert row_main is not None
+        assert row_sub["pick_id"] == row_main["pick_id"] == "alpha"
+        assert row_sub["n_signals"] == row_main["n_signals"] == 1
+        assert row_sub["total_return"] == row_main["total_return"]
+
+
 # ---------- 诊断（_diagnose_pkl） ----------
 
 class TestDiagnosePkl:
