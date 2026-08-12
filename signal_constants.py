@@ -6,6 +6,7 @@
 NESTED_2BC_PREFIX: str = "nested_2bc"
 PAIR_SEG_PREFIX: str = "pair_seg"
 CL2B_PAIR_PREFIX: str = "cl2b_pair"
+CL2B_TRIANGLE_PREFIX: str = "cl2b_triangle"
 BC_XD4_PREFIX: str = "bc_xd4"
 CL3B_MACD_PREFIX: str = "cl3b_macd"
 CL3B_ZSX_PREFIX: str = "cl3b_zsx"

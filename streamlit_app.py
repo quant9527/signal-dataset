@@ -39,6 +39,7 @@ from app_pages.search_signals import page_search_signals
 from app_pages.sector_signals import page_sector_signals
 from app_pages.signal_bc_xd4 import page_signal_bc_xd4
 from app_pages.signal_cl2b_pair import page_signal_cl2b_pair
+from app_pages.signal_cl2b_triangle import page_signal_cl2b_triangle
 from app_pages.today_opportunities import page_today_opportunities
 
 pages: dict[str, list[st.StreamlitPage]] = {
@@ -60,6 +61,8 @@ pages: dict[str, list[st.StreamlitPage]] = {
         st.Page(page_main_then_yd,            title="主→yd",      icon="🔗", url_path="main_then_yd"),
         st.Page(page_signal_cl2b_pair, title="CL2B Pair", icon="🔎",
                 url_path="signal_cl2b_pair"),
+        st.Page(page_signal_cl2b_triangle, title="CL2B Triangle", icon="📐",
+                url_path="signal_cl2b_triangle"),
         st.Page(page_signal_bc_xd4, title="BC XD4", icon="📉",
                 url_path="signal_bc_xd4"),
     ],
