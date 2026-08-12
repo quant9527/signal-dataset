@@ -23,6 +23,15 @@ TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 # 均线颜色
 MA_COLORS = ["#ffeb3b", "#29b6f6", "#ab47bc", "#66bb6a", "#ffa726", "#ec407a"]
 
+# 布林带参数（BOLL(20, 2)，与常见行情软件一致）
+BOLL_WINDOW = 20
+BOLL_STD_MULT = 2.0
+BOLL_LINES: list[tuple[str, str, str]] = [
+    ("_boll_upper", "BOLL上", "#f778ba"),
+    ("_boll_mid", "BOLL中", "#e6edf3"),
+    ("_boll_lower", "BOLL下", "#56d4dd"),
+]
+
 
 def _fmt_price(v: float) -> float:
     """价格类数值格式化：>=1 保留两位小数，<1 保留原精度。"""
@@ -170,6 +179,15 @@ def _prepare_kline_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, dict] | None:
 
     out = out.dropna(subset=["_x", "close"]).sort_values("_x")
 
+    # 布林带：基于收盘价本地计算（中轨 = 20 周期 SMA，上下轨 = 中轨 ± 2σ，总体标准差）。
+    # 必须在按时间排序之后计算，保证 rolling 窗口按时间推进。
+    close_s = out["close"]
+    mid = close_s.rolling(BOLL_WINDOW, min_periods=BOLL_WINDOW).mean()
+    std = close_s.rolling(BOLL_WINDOW, min_periods=BOLL_WINDOW).std(ddof=0)
+    out["_boll_mid"] = mid
+    out["_boll_upper"] = mid + BOLL_STD_MULT * std
+    out["_boll_lower"] = mid - BOLL_STD_MULT * std
+
     meta = {
         "has_volume": has_volume,
         "ma_cols": ma_plot,
@@ -244,6 +262,25 @@ def to_echarts_ma(prep: pd.DataFrame, ma_cols: list[str]) -> list[dict[str, Any]
                 "name": lc.upper(),
                 "data": [None if pd.isna(v) else round(float(v), 4) for v in s],
                 "color": MA_COLORS[i % len(MA_COLORS)],
+            }
+        )
+    return lines
+
+
+def to_echarts_boll(prep: pd.DataFrame) -> list[dict[str, Any]]:
+    """布林带三线（上/中/下轨），数据不足一个窗口时返回空列表。"""
+    lines: list[dict] = []
+    for col, name, color in BOLL_LINES:
+        if col not in prep.columns:
+            continue
+        s = prep[col]
+        if s.notna().sum() == 0:
+            continue
+        lines.append(
+            {
+                "name": name,
+                "data": [None if pd.isna(v) else round(float(v), 4) for v in s],
+                "color": color,
             }
         )
     return lines
@@ -399,8 +436,9 @@ def build_chart_meta(
     ma_lines: list[dict[str, Any]],
     signals: list[dict],
     pct_change: list[float | None] | None = None,
+    boll_lines: list[dict[str, Any]] | None = None,
 ) -> dict:
-    """固定 tooltip 所需的每图数据：日期、K 线、均线、按 bar 聚合的信号、涨跌幅。"""
+    """固定 tooltip 所需的每图数据：日期、K 线、均线、布林带、按 bar 聚合的信号、涨跌幅。"""
     sig_by_idx: dict[int, list[dict]] = {}
     for sig in signals:
         kind = sig.get("kind")
@@ -422,6 +460,8 @@ def build_chart_meta(
     }
     if pct_change is not None:
         meta["pct_change"] = pct_change
+    if boll_lines:
+        meta["boll"] = boll_lines
     return meta
 
 
@@ -537,8 +577,9 @@ def build_symbol_candle_option(
     has_volume: bool,
     signals: list[dict] | None = None,
     height: int = 600,
+    boll_lines: list[dict[str, Any]] | None = None,
 ) -> dict:
-    """单个标的的 K 线 + 成交量 + MACD + 信号箭头（Kline.html 风格）。"""
+    """单个标的的 K 线 + 成交量 + MACD + 布林带 + 信号箭头（Kline.html 风格）。"""
     has_macd = macd is not None
     grids = _kline_grids(has_volume, has_macd, height)
     n_grids = len(grids)
@@ -576,6 +617,18 @@ def build_symbol_candle_option(
             "lineStyle": {"width": 1.2, "color": ma["color"]},
         })
 
+    # 布林带三线：虚线叠加在主图，图例可点击隐藏
+    for boll in boll_lines or []:
+        series.append({
+            "type": "line",
+            "name": boll["name"],
+            "data": boll["data"],
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+            "symbol": "none",
+            "lineStyle": {"width": 1, "color": boll["color"], "type": "dashed"},
+        })
+
     if has_volume:
         vol_idx = 1
         bar_data: list[dict] = []
@@ -601,7 +654,7 @@ def build_symbol_candle_option(
 
     series.extend(_build_signal_arrow_series(signals or [], ohlc))
 
-    legend_names = ["K线"] + [m["name"] for m in ma_lines]
+    legend_names = ["K线"] + [m["name"] for m in ma_lines] + [b["name"] for b in boll_lines or []]
     if has_volume:
         legend_names.append("成交量")
     if has_macd:
@@ -691,6 +744,13 @@ function klineAxisTip(params, meta){
         maParts.push('<span style="color:'+ma.color+'">'+ma.name+'</span>'+Number(v).toFixed(2));
     });
     if(maParts.length) html+=sep+maParts.join(sep);
+    var bollParts=[];
+    (meta.boll||[]).forEach(function(b){
+        var v=b.data[di];
+        if(v==null) return;
+        bollParts.push('<span style="color:'+b.color+'">'+b.name+'</span>'+Number(v).toFixed(2));
+    });
+    if(bollParts.length) html+=sep+bollParts.join(sep);
     var pct=meta.pct_change&&meta.pct_change[di];
     if(pct!=null){
         var pctClass=pct>=0?'color:'+UP:'color:'+DOWN;

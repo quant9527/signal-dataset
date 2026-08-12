@@ -244,6 +244,7 @@ def _build_charts(
         ohlc = kc.to_echarts_ohlc(prep)
         vol = kc.to_echarts_volume(prep)
         ma_lines = kc.to_echarts_ma(prep, meta["ma_cols"])
+        boll_lines = kc.to_echarts_boll(prep)
         macd = kc.to_echarts_macd(prep, meta["macd"])
         has_vol = meta["has_volume"] and prep["volume"].notna().any()
 
@@ -272,9 +273,10 @@ def _build_charts(
                 has_volume=has_vol,
                 signals=signals or None,
                 height=chart_height,
+                boll_lines=boll_lines,
             ),
         })
-        metas[cid] = kc.build_chart_meta(labels, ohlc, ma_lines, signals, pct_change_list)
+        metas[cid] = kc.build_chart_meta(labels, ohlc, ma_lines, signals, pct_change_list, boll_lines=boll_lines)
 
     bar_counts = {tok: len(prep) for tok, (prep, _) in sym_data.items()}
     return charts, metas, bar_counts
