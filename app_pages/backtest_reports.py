@@ -1,475 +1,399 @@
 """Backtest reports page (url_path=backtest_reports).
 
-扫描 quant-lab/files/*.pkl，反序列化为 BacktestResult，渲染关键指标、
-信号、Top/Bot 交易。点击"详情"展开完整报告。
-
-数据契约（与 quant-lab/vbt/report.py 对齐）
-------------------------------------------
-- 文件名：``YYYYMMDD_HHMMSS_<pick_id>.pkl``
-- 内容：``pickle.dump(framework.BacktestResult, ...)``
-  - ``pf`` 字段已为 None（BacktestResult.__getstate__ 丢弃 vbt Portfolio）
-  - 含 ``start / end / version / data / entries_map / exits_map / signals_map``
+从 PostgreSQL ``public.signal`` 表读取信号记录，按 run_id 分组展示，
+join ``public.backtest_report`` 拿回测元信息。
 """
 from __future__ import annotations
 
-import gc
-import json
 import os
-import pickle
-import re
-import subprocess
-import sys
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import psycopg
 import streamlit as st
 
-# quant-lab 报告目录，可根据部署环境调整（与 vbt.report.DEFAULT_FILES_DIR 对齐）
-QUANT_LAB_FILES = os.environ.get(
-    "QUANT_LAB_FILES_DIR", "/home/lei/repo/quant-lab/files"
-)
 
-# 索引文件：缓存每个 pkl 的元信息，避免每次反序列化 4GB+ 大文件
-_INDEX_BASENAME: str = ".signalview_report_index.json"
-_INDEX_VERSION: int = 1
+# ---------- 数据库连接 ----------
 
-# 超过此大小的 pkl 在独立子进程中反序列化，避免主进程 OOM
-_SUBPROCESS_SIZE_THRESHOLD_MB: int = 500
-
-
-def _parse_filename_dt(filename: str) -> datetime | None:
-    m = re.search(r"(\d{8})_(\d{6})", filename)
-    if m:
-        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y%m%d %H%M%S")
-    return None
-
-
-def _pick_id_from_filename(filename: str) -> str:
-    """``YYYYMMDD_HHMMSS_<pick_id>.pkl`` → ``<pick_id>``。"""
-    base = os.path.splitext(filename)[0]
-    parts = base.split("_", 2)
-    return parts[2] if len(parts) >= 3 else base
-
-
-def _safe_load_pickle(path: str) -> dict[str, Any] | None:
-    """加载 pkl 为 dict 视图（即使 dataclass 缺失字段也不崩）。"""
+def _get_db_url() -> str | None:
+    """优先读取 ``.streamlit/secrets.toml``，其次环境变量 ``DATABASE_URL``。"""
     try:
-        with open(path, "rb") as f:
-            obj = pickle.load(f)
-    except Exception:
-        return None
-    if hasattr(obj, "__dict__"):
-        return obj.__dict__
-    if isinstance(obj, dict):
-        return obj
-    return {"_raw": obj}
+        return st.secrets["connections"]["quantdb"]["url"]
+    except (KeyError, FileNotFoundError, Exception):
+        pass
+    return os.environ.get("DATABASE_URL")
 
 
-def _freq_str(result: dict[str, Any]) -> str:
-    """汇总 data 字典里的 freq。"""
-    freqs: set[str] = set()
-    for key in (result.get("data") or {}):
-        parts = str(key).split(":")
-        if len(parts) >= 3:
-            freqs.add(parts[2])
-    return ",".join(sorted(freqs)) or "-"
-
-
-def _stats_daily(result: dict[str, Any]) -> pd.Series:
-    """优先读取 pkl 中预存的 stats_daily；缺失时再 fallback 到 raw 对象方法。"""
-    cached = result.get("stats_daily")
-    if isinstance(cached, dict) and cached:
-        try:
-            return pd.Series(cached)
-        except Exception:
-            pass
-    obj = result.get("_raw")
-    if obj is not None and hasattr(obj, "stats_daily"):
-        try:
-            return obj.stats_daily()
-        except Exception:
-            pass
-    return pd.Series(dtype=float)
-
-
-def _signals_df(result: dict[str, Any]) -> pd.DataFrame:
-    """从 signals_map 展平为 DataFrame。"""
-    smap = result.get("signals_map") or {}
-    rows = []
-    for key, sigs in smap.items():
-        for s in sigs:
-            rows.append(
-                {
-                    "symbol_id": key,
-                    "signal_date": s.get("date"),
-                    "price": s.get("price"),
-                    "signal_name": s.get("signal_name", ""),
-                }
-            )
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["signal_date"] = pd.to_datetime(df["signal_date"], errors="coerce")
-    return df
-
-
-def _n_trades(result: dict[str, Any]) -> int:
-    pf = result.get("pf")
-    if pf is not None and hasattr(pf, "trades"):
-        try:
-            return len(pf.trades.records_readable)
-        except Exception:
-            return 0
-    return 0
-
-
-def _summary_row(filename: str, pkl_path: str) -> dict[str, Any] | None:
-    """从 pkl 提取列表展示所需的元信息。失败返回 None。"""
-    result = _safe_load_pickle(pkl_path)
-    if result is None:
-        return None
-    stats = _stats_daily(result)
-    sigs = _signals_df(result)
-    def _f(k):
-        return float(stats[k]) if k in stats and pd.notna(stats[k]) else None
-    return {
-        "filename": filename,
-        "base": os.path.splitext(filename)[0],
-        "pick_id": _pick_id_from_filename(filename),
-        "created_at": _parse_filename_dt(filename),
-        "start": result.get("start"),
-        "end": result.get("end"),
-        "version": result.get("version"),
-        "freqs": _freq_str(result),
-        "n_signals": len(sigs),
-        "n_trades": _n_trades(result),
-        "total_return": _f("Total Return [%]"),
-        "annual_return": _f("Annualized Return [%]"),
-        "sharpe": _f("Sharpe Ratio"),
-        "max_dd": _f("Max Drawdown [%]"),
-        "pkl_path": pkl_path,
-    }
-
-
-# 子进程加载脚本：大文件在独立 Python 进程中反序列化，避免主进程 OOM
-_SIGNALVIEW_ROOT = str(Path(__file__).resolve().parents[1])
-
-_SUBPROCESS_LOAD_SCRIPT = """
-import json, sys
-sys.path.insert(0, {root!r})
-from app_pages.backtest_reports import _summary_row
-filename = sys.argv[1]
-pkl_path = sys.argv[2]
-row = _summary_row(filename, pkl_path)
-print(json.dumps(row, default=lambda o: o.isoformat() if hasattr(o, \"isoformat\") else str(o)))
-"""
-
-
-def _summary_row_in_subprocess(filename: str, pkl_path: str) -> dict[str, Any] | None:
-    """在独立子进程中加载大 pkl 并提取元信息。
-
-    子进程退出后其占用的内存会被操作系统回收，适合 500MB+ 的大文件，
-    避免主进程同时驻留多个反序列化后的巨大对象。
-    """
-    script = _SUBPROCESS_LOAD_SCRIPT.format(root=_SIGNALVIEW_ROOT)
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script, filename, pkl_path],
-            capture_output=True,
-            text=True,
-            timeout=600,
+def _get_connection():
+    """建立到 quant 数据库的连接。"""
+    url = _get_db_url()
+    if not url:
+        raise RuntimeError(
+            "未配置数据库连接。请检查 .streamlit/secrets.toml 或 DATABASE_URL 环境变量。"
         )
-        if proc.returncode != 0:
-            return None
-        row = json.loads(proc.stdout)
-        if row is None:
-            return None
-        if row.get("created_at"):
-            row["created_at"] = datetime.fromisoformat(row["created_at"])
-        return row
-    except Exception:
-        return None
+    return psycopg.connect(url)
 
 
-# ---------- 索引：避免每次反序列化大 pkl ----------
+# ---------- 数据查询 ----------
 
-def _index_path() -> str:
-    return os.path.join(QUANT_LAB_FILES, _INDEX_BASENAME)
-
-
-def _json_default(obj: Any) -> Any:
-    """datetime 等对象在写入 JSON 索引前的序列化钩子。"""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-
-def _json_object_hook(d: dict[str, Any]) -> dict[str, Any]:
-    """读取 JSON 索引时，把 ISO 格式时间戳还原为 datetime。"""
-    if "created_at" in d and isinstance(d["created_at"], str):
-        try:
-            d["created_at"] = datetime.fromisoformat(d["created_at"])
-        except ValueError:
-            pass
-    return d
-
-
-def _load_index() -> dict[str, Any]:
-    """读取索引文件；不存在或版本不符时返回空索引。"""
-    path = _index_path()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            idx = json.load(f, object_hook=_json_object_hook)
-    except Exception:
-        return {"version": _INDEX_VERSION, "entries": {}}
-    if idx.get("version") != _INDEX_VERSION:
-        return {"version": _INDEX_VERSION, "entries": {}}
-    return idx
-
-
-def _save_index(idx: dict[str, Any]) -> None:
-    """原子写索引文件。"""
-    path = _index_path()
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(idx, f, ensure_ascii=False, default=_json_default)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-
-
-def _file_identity(path: str) -> tuple[float, int] | None:
-    """返回文件 (mtime, size)，用于判断 pkl 是否被替换。"""
-    try:
-        st = os.stat(path)
-        return (st.st_mtime, st.st_size)
-    except OSError:
-        return None
-
-
-def _build_index_incrementally(pkl_names: tuple[str, ...]) -> list[dict[str, Any]]:
-    """基于现有索引增量更新，返回当前所有有效 pkl 的 summary rows。
-
-    只加载新增或 mtime/size 变化的文件；已索引且未变化的文件直接复用缓存行。
+def _summary_rows() -> list[dict[str, Any]]:
+    """从 ``backtest_report`` 拉列表，n_signals/n_symbols/freqs 从 ``signal`` 聚合补充。"""
+    query = """
+    SELECT
+        r.run_id,
+        r.pick_id,
+        r.source,
+        r.start_date,
+        r.end_date,
+        r.freqs AS report_freqs,
+        r.version,
+        r.n_symbols AS report_n_symbols,
+        r.n_signals AS report_n_signals,
+        r.n_trades,
+        r.total_return,
+        r.annual_return,
+        r.sharpe,
+        r.max_dd,
+        r.created_at,
+        COALESCE(s.actual_n_signals, r.n_signals) AS n_signals,
+        COALESCE(s.actual_n_symbols, r.n_symbols) AS n_symbols,
+        s.earliest_signal_date,
+        s.latest_signal_date,
+        s.freqs
+    FROM public.backtest_report r
+    LEFT JOIN (
+        SELECT
+            run_id,
+            COUNT(*) AS actual_n_signals,
+            COUNT(DISTINCT symbol_id) AS actual_n_symbols,
+            MIN(signal_date) AS earliest_signal_date,
+            MAX(signal_date) AS latest_signal_date,
+            STRING_AGG(DISTINCT freq, ',' ORDER BY freq) AS freqs
+        FROM public.signal
+        GROUP BY run_id
+    ) s ON s.run_id = r.run_id
+    ORDER BY r.created_at DESC
     """
-    idx = _load_index()
-    entries: dict[str, Any] = idx.get("entries", {})
-    current_names = set(pkl_names)
-
-    # 清理已删除的文件条目
-    for fname in list(entries.keys()):
-        if fname not in current_names:
-            del entries[fname]
-
-    rows: list[dict[str, Any]] = []
-    for fname in pkl_names:
-        pkl_path = os.path.join(QUANT_LAB_FILES, fname)
-        identity = _file_identity(pkl_path)
-        if identity is None:
-            entries.pop(fname, None)
-            continue
-
-        mtime, size = identity
-        cached = entries.get(fname)
-        if cached and cached.get("mtime") == mtime and cached.get("size") == size:
-            row = cached.get("row")
-        else:
-            # 大文件在子进程中加载，避免主进程 OOM
-            if size > _SUBPROCESS_SIZE_THRESHOLD_MB * 1024 * 1024:
-                row = _summary_row_in_subprocess(fname, pkl_path)
-            else:
-                row = _summary_row(fname, pkl_path)
-            if row is not None:
-                entries[fname] = {
-                    "mtime": mtime,
-                    "size": size,
-                    "row": row,
-                }
-            else:
-                entries.pop(fname, None)
-                continue
-
-        if row is not None:
-            rows.append(row)
-
-        # 大 pkl 反序列化后及时回收内存，避免多个 4GB+ 文件同时驻留
-        gc.collect()
-
-    _save_index(idx)
-    return rows
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            cols = [desc[0] for desc in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _scan_cache_key() -> tuple[tuple[str, float, int], ...]:
-    """计算扫描缓存键：每个 pkl 的 (name, mtime, size) 元组。
-
-    比目录 mtime 更精确：新增 / 删除 / 替换 / 修改任一 pkl 都会改变 key，
-    触发 st.cache_data 失效；同时避免目录 mtime 在极短时间内未更新的问题。
+def _get_signals_by_run_id(run_id: str) -> pd.DataFrame:
+    """按 run_id 查询信号明细并展平为 DataFrame。"""
+    query = """
+    SELECT
+        symbol_id,
+        exchange,
+        symbol,
+        freq,
+        symbol_name,
+        signal_date,
+        signal_name,
+        signal,
+        side,
+        reason,
+        price,
+        score,
+        shares,
+        info,
+        version,
+        pick_id,
+        run_id,
+        pick_dt
+    FROM public.signal
+    WHERE run_id = %s
+    ORDER BY signal_date DESC, symbol_id
     """
-    if not os.path.isdir(QUANT_LAB_FILES):
-        return ()
-    entries: list[tuple[str, float, int]] = []
-    for fname in sorted(os.listdir(QUANT_LAB_FILES)):
-        if not fname.endswith(".pkl"):
-            continue
-        pkl_path = os.path.join(QUANT_LAB_FILES, fname)
-        try:
-            st = os.stat(pkl_path)
-            entries.append((fname, st.st_mtime, st.st_size))
-        except OSError:
-            entries.append((fname, 0.0, 0))
-    return tuple(entries)
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _list_reports_cached(key: tuple[tuple[str, float, int], ...]) -> pd.DataFrame:
-    """list_reports 的缓存实现。参数 hash 变化时缓存失效。"""
-    pkl_names = tuple(entry[0] for entry in key)
-    rows = _build_index_incrementally(pkl_names)
-    df = pd.DataFrame(rows)
-    if not df.empty and "created_at" in df.columns:
-        df = df.sort_values("created_at", ascending=False)
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (run_id,))
+            cols = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+    df = pd.DataFrame(rows, columns=cols)
+    if not df.empty and "signal_date" in df.columns:
+        df["signal_date"] = pd.to_datetime(df["signal_date"], errors="coerce")
+    if not df.empty and "pick_dt" in df.columns:
+        df["pick_dt"] = pd.to_datetime(df["pick_dt"], errors="coerce")
     return df
 
+
+def _get_report_meta(run_id: str) -> dict[str, Any] | None:
+    """按 run_id 从 backtest_report 取元信息（无记录则返回 None）。"""
+    query = """
+    SELECT
+        run_id, pick_id, source, start_date, end_date, freqs,
+        version, n_symbols, n_signals, n_trades,
+        total_return, annual_return, sharpe, max_dd, created_at
+    FROM public.backtest_report
+    WHERE run_id = %s
+    LIMIT 1
+    """
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (run_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
+
+
+def _get_top_bot_trades(run_id: str, n: int = 20) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """按 run_id 取收益最高 / 最低的 n 笔 trade（return_pct NULL 视为未平仓，跳过）。
+
+    每行额外生成 ``kline_url``，指向 signalview 的 K 线页
+    （``/kline?symbol=<symbol_id>&start=<entry-7d>&end=<exit+7d>``），
+    方便观察信号出现前后的 K 线走势。
+    """
+    base_sql = """
+    SELECT
+        symbol_id, freq, direction, entry_ts, exit_ts,
+        entry_price, exit_price, size, pnl, return_pct
+    FROM public.backtest_trade
+    WHERE run_id = %s AND return_pct IS NOT NULL
+    """
+    top_sql = base_sql + " ORDER BY return_pct DESC LIMIT %s"
+    bot_sql = base_sql + " ORDER BY return_pct ASC LIMIT %s"
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(top_sql, (run_id, n))
+            top_cols = [desc[0] for desc in cur.description]
+            top_rows = cur.fetchall()
+            cur.execute(bot_sql, (run_id, n))
+            bot_rows = cur.fetchall()
+    top_df = pd.DataFrame(top_rows, columns=top_cols)
+    bot_df = pd.DataFrame(bot_rows, columns=top_cols)
+    for df in (top_df, bot_df):
+        if not df.empty:
+            for col in ("entry_ts", "exit_ts"):
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            df["kline_url"] = df.apply(_build_kline_url, axis=1)
+    return top_df, bot_df
+
+
+def _build_kline_url(row: pd.Series) -> str:
+    """生成 signalview K 线页 URL（前后 ±7 天窗口，便于观察信号前后走势）。"""
+    symbol_id = str(row.get("symbol_id") or "")
+    entry = row.get("entry_ts")
+    exit_ = row.get("exit_ts")
+    # 默认窗口：entry-30d ~ exit+30d（fallback 用于缺时间戳的行）
+    end_dt = exit_ if pd.notna(exit_) else (entry if pd.notna(entry) else pd.Timestamp.utcnow())
+    start_dt = entry if pd.notna(entry) else (end_dt - pd.Timedelta(days=30))
+    start = (start_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    end = (end_dt + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    return f"/kline?symbol={symbol_id}&start={start}&end={end}"
+
+
+# ---------- 列表页 ----------
 
 def list_reports(force_rebuild: bool = False) -> pd.DataFrame:
-    """扫描 quant-lab/files/*.pkl，返回列表 DataFrame（30s 缓存 + mtime 失效）。
+    """返回所有信号分组列表 DataFrame。
 
-    缓存策略：30s TTL + 入参为 (dir_mtime, sorted(pkl_names))。新增 / 删除 /
-    替换 pkl 文件会改变入参 hash，缓存自动失效。30s TTL 兜底防止目录外
-    文件被替换但 mtime 不变的场景。
-
-    性能：通过 ``.signalview_report_index.json`` 缓存每个 pkl 的元信息，
-    避免每次反序列化大文件。当 pkl mtime/size 不变时直接复用索引。
+    ``force_rebuild`` 参数仅保留兼容旧签名，已无实际作用（数据来源是数据库，
+    无需再构建文件索引）。
     """
-    if force_rebuild:
-        _save_index({"version": _INDEX_VERSION, "entries": {}})
-        _list_reports_cached.clear()
-    return _list_reports_cached(_scan_cache_key())
+    rows = _summary_rows()
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    for col in ("earliest_signal_date", "latest_signal_date"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
 
 
-def delete_report(base: str) -> list[str]:
-    """删除指定 base 的 pkl 文件，返回实际删除的文件名列表。"""
-    deleted = []
-    path = os.path.join(QUANT_LAB_FILES, f"{base}.pkl")
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-            deleted.append(os.path.basename(path))
-        except OSError:
-            pass
-    return deleted
+# ---------- 详情页 ----------
 
-
-def _diagnose_pkl(result: dict[str, Any] | None) -> str:
-    """诊断 pkl 内容状态：完整 / 无信号 / 无数据 / 损坏。
-
-    Returns:
-        ``"ok" | "empty_data" | "no_signals" | "no_pf" | "corrupt"``
-
-    注意：pkl 中 pf 字段始终为 None（``BacktestResult.__getstate__`` 丢弃），但
-    stats_daily 字段被 vbt.report.save_pickle 预存。所以"ok"判断看 stats_daily
-    是否非空，而非 pf 是否存在。
-    """
-    if result is None:
-        return "corrupt"
-    data = result.get("data") or {}
-    signals_map = result.get("signals_map") or {}
-    n_signals = sum(len(v) for v in signals_map.values())
-    if not data:
-        return "empty_data"
-    if n_signals == 0:
-        return "no_signals"
-    # pf 在 pkl 中始终为 None（设计如此）；有 stats_daily 就算"完整"
-    stats = result.get("stats_daily") or {}
-    if not stats:
-        return "no_pf"
-    return "ok"
-
-
-def _render_detail(base: str) -> None:
-    """展开单次回测的完整报告。"""
-    pkl_path = os.path.join(QUANT_LAB_FILES, f"{base}.pkl")
-    result = _safe_load_pickle(pkl_path)
-    if result is None:
-        st.error(f"无法加载 pkl：{pkl_path}")
+def _render_detail(run_id: str) -> None:
+    """从数据库加载并渲染单个 run_id 的信号详情，并展示 backtest_report 元信息。"""
+    sigs = _get_signals_by_run_id(run_id)
+    if sigs.empty:
+        st.error(f"找不到信号：{run_id}")
         return
 
-    diagnosis = _diagnose_pkl(result)
-    if diagnosis == "empty_data":
-        st.error(
-            f"此 pkl 不含回测数据（data 字段为空）。"
-            f"可能是 vbt 回测未拉取到任何标的，或 pkl 损坏。"
-            f"路径：{pkl_path}"
-        )
-        return
-    if diagnosis == "corrupt":
-        st.error(f"无法加载 pkl：{pkl_path}")
-        return
+    report = _get_report_meta(run_id)
+    title = f"📈 {run_id}"
+    if report:
+        title += f"  (pick_id={report.get('pick_id', '')})"
+    st.subheader(title)
 
-    st.subheader(f"📈 {base}")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("回测区间", f"{result.get('start')} ~ {result.get('end')}")
-    c2.metric("周期", _freq_str(result))
-    c3.metric("策略版本", str(result.get("version")))
-    c4.metric("标的数", len(result.get("data") or {}))
+    c1.metric("信号数", len(sigs))
+    c2.metric("标的数", sigs["symbol_id"].nunique())
+    c3.metric("周期", ", ".join(sorted(sigs["freq"].dropna().unique())) or "-")
+    if report and report.get("sharpe") is not None:
+        c4.metric("Sharpe", f"{report['sharpe']:.2f}")
+    elif report:
+        c4.metric("回测来源", report.get("source", "-"))
 
-    if diagnosis == "no_signals":
+    if report:
+        st.divider()
+        st.markdown("**回测报告（backtest_report）**")
+        rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+        rc1.metric("总收益", f"{report['total_return']*100:.2f}%" if report.get("total_return") is not None else "-")
+        rc2.metric("年化", f"{report['annual_return']*100:.2f}%" if report.get("annual_return") is not None else "-")
+        rc3.metric("最大回撤", f"{report['max_dd']*100:.2f}%" if report.get("max_dd") is not None else "-")
+        rc4.metric("交易笔数", report.get("n_trades", 0) or 0)
+        rc5.metric("起止", f"{report.get('start_date', '-')}~{report.get('end_date', '-')}")
+    else:
         st.warning(
-            "此回测在指定区间内未触发任何信号（signals_map 为空）。"
-            "可能原因：区间太短 / 策略条件过严 / 数据缺失。"
-        )
-    elif diagnosis == "no_pf":
-        st.warning(
-            "此 pkl 不含 vectorbt Portfolio（pf=None），可能由旧版工具生成或"
-            "pf 构造异常。指标数据不可用，仅展示信号与元信息。"
+            f"run_id={run_id} 在 backtest_report 表里没有记录，仅展示 signal 明细。"
         )
 
     st.divider()
-    stats = _stats_daily(result)
-    if not stats.empty:
-        st.markdown("**关键指标（按日重采样口径）**")
-        st.dataframe(stats.to_frame("数值"), width="stretch")
-    else:
-        st.info("无组合级指标（pf 为 None 或 stats_daily 不可用）。")
-
-    sigs = _signals_df(result)
     st.markdown(f"**信号明细（{len(sigs)} 条）**")
-    if not sigs.empty:
-        st.dataframe(sigs, width="stretch", height=300)
-    else:
-        st.caption("（无信号）")
+    st.dataframe(sigs, width="stretch", height=400)
 
+    # top/bot 20 交易（按 return_pct 排序）
+    top_df, bot_df = _get_top_bot_trades(run_id, n=20)
+    st.divider()
+    st.subheader("💰 交易表现 Top 20 / Bottom 20")
+    if top_df.empty and bot_df.empty:
+        st.info("该 run 暂无 trade 明细（backtest_trade 表为空，可能是老 run 或未产生交易）。")
+    else:
+        col_top, col_bot = st.columns(2)
+        with col_top:
+            st.markdown("**🟢 收益最高 20 笔**")
+            if top_df.empty:
+                st.caption("（无）")
+            else:
+                display_top = top_df.copy()
+                if "return_pct" in display_top.columns:
+                    display_top["return_pct"] = display_top["return_pct"].apply(
+                        lambda v: f"{v:.2%}" if pd.notna(v) else "-"
+                    )
+                if "pnl" in display_top.columns:
+                    display_top["pnl"] = display_top["pnl"].apply(
+                        lambda v: f"{v:,.0f}" if pd.notna(v) else "-"
+                    )
+                for c in ("entry_ts", "exit_ts"):
+                    if c in display_top.columns:
+                        display_top[c] = pd.to_datetime(display_top[c]).dt.strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                display_top.rename(
+                    columns={
+                        "symbol_id": "symbol_id",
+                        "freq": "周期",
+                        "direction": "方向",
+                        "entry_ts": "入场",
+                        "exit_ts": "出场",
+                        "entry_price": "入场价",
+                        "exit_price": "出场价",
+                        "size": "仓位",
+                        "pnl": "盈亏",
+                        "return_pct": "收益率",
+                        "kline_url": "K线",
+                    },
+                    inplace=True,
+                )
+                _render_trades_table(display_top, height=420)
+        with col_bot:
+            st.markdown("**🔴 亏损最大 20 笔**")
+            if bot_df.empty:
+                st.caption("（无）")
+            else:
+                display_bot = bot_df.copy()
+                if "return_pct" in display_bot.columns:
+                    display_bot["return_pct"] = display_bot["return_pct"].apply(
+                        lambda v: f"{v:.2%}" if pd.notna(v) else "-"
+                    )
+                if "pnl" in display_bot.columns:
+                    display_bot["pnl"] = display_bot["pnl"].apply(
+                        lambda v: f"{v:,.0f}" if pd.notna(v) else "-"
+                    )
+                for c in ("entry_ts", "exit_ts"):
+                    if c in display_bot.columns:
+                        display_bot[c] = pd.to_datetime(display_bot[c]).dt.strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                display_bot.rename(
+                    columns={
+                        "symbol_id": "symbol_id",
+                        "freq": "周期",
+                        "direction": "方向",
+                        "entry_ts": "入场",
+                        "exit_ts": "出场",
+                        "entry_price": "入场价",
+                        "exit_price": "出场价",
+                        "size": "仓位",
+                        "pnl": "盈亏",
+                        "return_pct": "收益率",
+                        "kline_url": "K线",
+                    },
+                    inplace=True,
+                )
+                _render_trades_table(display_bot, height=420)
+
+
+def _render_trades_table(df: pd.DataFrame, height: int) -> None:
+    """渲染 top/bot trade 表：K线 列渲染为可点击链接。"""
+    column_config = {
+        "K线": st.column_config.LinkColumn(
+            label="K线",
+            help="跳转 signalview K 线页（窗口 = 入场前 7d ~ 出场后 7d）",
+            display_text="🔗 K线",
+        ),
+        "收益率": st.column_config.TextColumn("收益率"),
+        "盈亏": st.column_config.TextColumn("盈亏"),
+    }
+    st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+        height=height,
+        column_config=column_config,
+    )
+
+
+# ---------- 删除 ----------
+
+def delete_report(run_id: str) -> list[str]:
+    """删除指定 run_id 的所有信号记录。"""
+    query = "DELETE FROM public.signal WHERE run_id = %s"
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (run_id,))
+            deleted = cur.rowcount
+        conn.commit()
+    return [run_id] if deleted else []
+
+
+# ---------- 页面入口 ----------
 
 def page_backtest_reports() -> None:
     st.set_page_config(page_title="Backtest Reports", layout="wide")
     st.title("📊 回测报告管理")
-    st.caption(f"自动发现自 `{QUANT_LAB_FILES}`（pkl-only，反序列化渲染）")
-
-    if not os.path.isdir(QUANT_LAB_FILES):
-        st.error(f"报告目录不存在：{QUANT_LAB_FILES}")
-        st.stop()
+    st.caption(
+        "主表：``backtest_report``（按 run_id 一行一次回测，含 sharpe / 总收益 / "
+        "最大回撤等指标）；明细：``signal`` 表按 run_id 关联展示。"
+    )
 
     if st.button("🔄 刷新列表", width="content"):
         st.rerun()
 
-    force_rebuild = st.button("🔄 重建索引", width="content", help="当索引损坏或需要强制重新扫描所有 pkl 时使用。大文件较多时可能需要一些时间。")
-
-    df = list_reports(force_rebuild=force_rebuild)
+    df = list_reports()
     if df.empty:
-        st.info("暂无报告。在 quant-lab 中运行回测后会自动出现在这里。")
+        st.info(
+            "暂无回测报告。运行以下命令生成：\n\n"
+            "```bash\n"
+            "# 离线回测（写 backtest_report + signal）\n"
+            "python -m vbt.run_and_save cl2b_pair --target as --freq 1d \\\n"
+            "    --start 2026-01-01 --end 2026-07-01\n"
+            "\n"
+            "# 或测试用例\n"
+            "pytest -v vbt/cl2b_triangle_test.py -k test_backtest_as -m slow\n"
+            "```"
+        )
         st.stop()
 
     filter_text = st.text_input(
-        "筛选报告", placeholder="pick_id / 日期 / 周期"
+        "筛选记录", placeholder="run_id / pick_id / 周期 / 日期"
     ).strip().lower()
     if filter_text:
         mask = df.astype(str).apply(
@@ -479,87 +403,88 @@ def page_backtest_reports() -> None:
         df = df[mask]
 
     if df.empty:
-        st.info("没有匹配筛选条件的报告。")
+        st.info("没有匹配筛选条件的记录。")
         st.stop()
 
-    st.subheader(f"共 {len(df)} 份报告")
+    st.subheader(f"共 {len(df)} 个 run")
 
     _display_df = df[
         [
-            "filename",
+            "run_id",
             "pick_id",
-            "created_at",
-            "freqs",
+            "latest_signal_date",
             "n_signals",
-            "n_trades",
-            "total_return",
+            "n_symbols",
+            "freqs",
             "sharpe",
+            "total_return",
             "max_dd",
         ]
     ].copy()
-    _display_df["created_at"] = pd.to_datetime(_display_df["created_at"]).dt.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    for col in ("total_return", "max_dd"):
+    for col in ("latest_signal_date",):
+        ts = pd.to_datetime(_display_df[col], errors="coerce")
+        _display_df[col] = ts.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("-")
+    for col, fmt in (("total_return", "{:.2%}"), ("max_dd", "{:.2%}"), ("sharpe", "{:.2f}")):
         _display_df[col] = _display_df[col].apply(
-            lambda v: f"{v:.2f}%" if pd.notna(v) else "-"
+            lambda v: fmt.format(v) if pd.notna(v) else "-"
         )
-    _display_df["sharpe"] = _display_df["sharpe"].apply(
-        lambda v: f"{v:.4f}" if pd.notna(v) else "-"
+    _display_df["详情"] = _display_df["run_id"].apply(
+        lambda rid: f"/backtest_report_detail?run_id={rid}"
     )
+    _display_df["删除"] = False
     _display_df.rename(
         columns={
-            "filename": "文件名",
+            "run_id": "run_id",
             "pick_id": "策略",
-            "created_at": "生成时间",
-            "freqs": "周期",
+            "latest_signal_date": "最新信号时间",
             "n_signals": "信号数",
-            "n_trades": "交易数",
-            "total_return": "总收益",
+            "n_symbols": "标的数",
+            "freqs": "周期",
             "sharpe": "Sharpe",
+            "total_return": "总收益",
             "max_dd": "最大回撤",
         },
         inplace=True,
     )
-    st.dataframe(_display_df, width="stretch", hide_index=True)
+    _display_df = _display_df[
+        ["删除", "run_id", "策略", "最新信号时间", "信号数", "标的数", "周期",
+         "Sharpe", "总收益", "最大回撤", "详情"]
+    ]
 
-    st.divider()
-    # 每份报告一个独立 item：左侧元信息 + 右侧"📑 详情"按钮，按钮在 item 内部。
-    # 点击跳转 url_path=backtest_report_detail（独立详情页，列表页不渲染详情）。
-    for _, row in df.iterrows():
-        with st.container(border=True):
-            c_info, c_act = st.columns([7, 1])
-            with c_info:
-                st.markdown(
-                    f"**{row['base']}**  &nbsp; "
-                    f"<span style='color:gray'>({row['pick_id']})</span>",
-                    unsafe_allow_html=True,
-                )
-                st.caption(
-                    pd.to_datetime(row["created_at"]).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                )
-            with c_act:
-                st.link_button(
-                    "📑 详情",
-                    url=f"/backtest_report_detail?base={row['base']}",
-                    width="stretch",
-                )
-
-    st.divider()
-    st.subheader("🗑️ 删除报告")
-    to_delete = st.multiselect(
-        "选择要删除的报告",
-        options=df["filename"].tolist(),
-        format_func=lambda x: f"{x}  ({df[df['filename'] == x]['pick_id'].iloc[0]})",
+    edited = st.data_editor(
+        _display_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "删除": st.column_config.CheckboxColumn(
+                label="删除",
+                help="勾选要删除的 run（点击下方按钮执行）",
+                default=False,
+            ),
+            "详情": st.column_config.LinkColumn(
+                label="详情",
+                help="跳转到该 run 的信号/交易明细页",
+                display_text="📑 详情",
+            ),
+            "run_id": st.column_config.TextColumn("run_id", disabled=True),
+            "策略": st.column_config.TextColumn("策略", disabled=True),
+            "最新信号时间": st.column_config.TextColumn("最新信号时间", disabled=True),
+            "信号数": st.column_config.NumberColumn("信号数", disabled=True),
+            "标的数": st.column_config.NumberColumn("标的数", disabled=True),
+            "周期": st.column_config.TextColumn("周期", disabled=True),
+            "Sharpe": st.column_config.TextColumn("Sharpe", disabled=True),
+            "总收益": st.column_config.TextColumn("总收益", disabled=True),
+            "最大回撤": st.column_config.TextColumn("最大回撤", disabled=True),
+        },
+        key="runs_table",
     )
+
+    to_delete = edited.loc[edited["删除"] == True, "run_id"].tolist()  # noqa: E712
     if to_delete and st.button(
-        f"🗑️ 删除选中的 {len(to_delete)} 份报告", type="primary"
+        f"🗑️ 删除选中的 {len(to_delete)} 个 run", type="primary"
     ):
         deleted_all = []
-        for fname in to_delete:
-            deleted = delete_report(os.path.splitext(fname)[0])
-            deleted_all.extend(deleted)
-        st.success(f"已删除 {len(deleted_all)} 个文件：{', '.join(deleted_all)}")
+        for run_id in to_delete:
+            deleted_all.extend(delete_report(run_id))
+        st.success(f"已删除 {len(deleted_all)} 个 run：{', '.join(deleted_all)}")
         st.rerun()

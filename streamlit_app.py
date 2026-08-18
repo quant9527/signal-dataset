@@ -19,6 +19,7 @@ from app_pages.alert_rule_crud import page_alert_rule_crud
 from app_pages.all_signals_by_symbol import page_all_signals_by_symbol
 from app_pages.backtest_report_detail import page_backtest_report_detail
 from app_pages.backtest_reports import page_backtest_reports
+from app_pages.walkfwd_compare import page_walkfwd_compare
 from app_pages.dashboard_as import page_dashboard_as
 from app_pages.dashboard_binance import page_dashboard_binance
 from app_pages.dashboard_em import page_dashboard_em
@@ -80,6 +81,8 @@ pages: dict[str, list[st.StreamlitPage]] = {
                 url_path="backtest_reports"),
         st.Page(page_backtest_report_detail, title="Backtest Report Detail",
                 icon="📑", url_path="backtest_report_detail"),
+        st.Page(page_walkfwd_compare, title="Walk-Forward Compare",
+                icon="🆚", url_path="walkfwd_compare"),
     ],
     "Performance": [
         st.Page(page_performance, title="Performance", icon="📊", url_path="performance"),
