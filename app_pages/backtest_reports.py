@@ -37,7 +37,12 @@ def _get_connection():
 # ---------- 数据查询 ----------
 
 def _summary_rows() -> list[dict[str, Any]]:
-    """从 ``backtest_report`` 拉列表，n_signals/n_symbols/freqs 从 ``signal`` 聚合补充。"""
+    """从 ``backtest_report`` 拉列表，n_signals/n_symbols/freqs 从 ``signal`` 聚合补充。
+
+    列名契约（与 quant-lab ``config/db_config.py`` 一致）：百分数字段列名自带 ``_pct``
+    后缀（``total_return_pct`` / ``annual_return_pct`` / ``max_dd_pct``），夏普为
+    ``sharpe_ratio``。DB 一律存百分数，signalview 显示端直接格式化，不再 ×100。
+    """
     query = """
     SELECT
         r.run_id,
@@ -50,10 +55,10 @@ def _summary_rows() -> list[dict[str, Any]]:
         r.n_symbols AS report_n_symbols,
         r.n_signals AS report_n_signals,
         r.n_trades,
-        r.total_return,
-        r.annual_return,
-        r.sharpe,
-        r.max_dd,
+        r.total_return_pct,
+        r.annual_return_pct,
+        r.sharpe_ratio,
+        r.max_dd_pct,
         r.created_at,
         COALESCE(s.actual_n_signals, r.n_signals) AS n_signals,
         COALESCE(s.actual_n_symbols, r.n_symbols) AS n_symbols,
@@ -121,12 +126,17 @@ def _get_signals_by_run_id(run_id: str) -> pd.DataFrame:
 
 
 def _get_report_meta(run_id: str) -> dict[str, Any] | None:
-    """按 run_id 从 backtest_report 取元信息（无记录则返回 None）。"""
+    """按 run_id 从 backtest_report 取元信息（无记录则返回 None）。
+
+    返回字典的 key 与 DB 列名一致：``total_return_pct`` / ``annual_return_pct`` /
+    ``sharpe_ratio`` / ``max_dd_pct``。值已是百分数（total_return_pct=53.97 表示 53.97%），
+    signalview 直接格式化显示，不再 ×100。
+    """
     query = """
     SELECT
         run_id, pick_id, source, start_date, end_date, freqs,
         version, n_symbols, n_signals, n_trades,
-        total_return, annual_return, sharpe, max_dd, created_at
+        total_return_pct, annual_return_pct, sharpe_ratio, max_dd_pct, created_at
     FROM public.backtest_report
     WHERE run_id = %s
     LIMIT 1
@@ -226,8 +236,8 @@ def _render_detail(run_id: str) -> None:
     c1.metric("信号数", len(sigs))
     c2.metric("标的数", sigs["symbol_id"].nunique())
     c3.metric("周期", ", ".join(sorted(sigs["freq"].dropna().unique())) or "-")
-    if report and report.get("sharpe") is not None:
-        c4.metric("Sharpe", f"{report['sharpe']:.2f}")
+    if report and report.get("sharpe_ratio") is not None:
+        c4.metric("Sharpe", f"{report['sharpe_ratio']:.2f}")
     elif report:
         c4.metric("回测来源", report.get("source", "-"))
 
@@ -235,9 +245,19 @@ def _render_detail(run_id: str) -> None:
         st.divider()
         st.markdown("**回测报告（backtest_report）**")
         rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-        rc1.metric("总收益", f"{report['total_return']*100:.2f}%" if report.get("total_return") is not None else "-")
-        rc2.metric("年化", f"{report['annual_return']*100:.2f}%" if report.get("annual_return") is not None else "-")
-        rc3.metric("最大回撤", f"{report['max_dd']*100:.2f}%" if report.get("max_dd") is not None else "-")
+        # DB 已统一存百分数（total_return_pct=53.97 即 53.97%），直接格式化不再 ×100
+        rc1.metric(
+            "总收益",
+            f"{report['total_return_pct']:.2f}%" if report.get("total_return_pct") is not None else "-",
+        )
+        rc2.metric(
+            "年化",
+            f"{report['annual_return_pct']:.2f}%" if report.get("annual_return_pct") is not None else "-",
+        )
+        rc3.metric(
+            "最大回撤",
+            f"{report['max_dd_pct']:.2f}%" if report.get("max_dd_pct") is not None else "-",
+        )
         rc4.metric("交易笔数", report.get("n_trades", 0) or 0)
         rc5.metric("起止", f"{report.get('start_date', '-')}~{report.get('end_date', '-')}")
     else:
@@ -416,15 +436,20 @@ def page_backtest_reports() -> None:
             "n_signals",
             "n_symbols",
             "freqs",
-            "sharpe",
-            "total_return",
-            "max_dd",
+            "sharpe_ratio",
+            "total_return_pct",
+            "max_dd_pct",
         ]
     ].copy()
     for col in ("latest_signal_date",):
         ts = pd.to_datetime(_display_df[col], errors="coerce")
         _display_df[col] = ts.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("-")
-    for col, fmt in (("total_return", "{:.2%}"), ("max_dd", "{:.2%}"), ("sharpe", "{:.2f}")):
+    # DB 已是百分数；用 {v:.2f}% 直接显示；不再 :.2%（那会 ×100）
+    for col, fmt in (
+        ("total_return_pct", "{:.2f}%"),
+        ("max_dd_pct", "{:.2f}%"),
+        ("sharpe_ratio", "{:.2f}"),
+    ):
         _display_df[col] = _display_df[col].apply(
             lambda v: fmt.format(v) if pd.notna(v) else "-"
         )
@@ -440,9 +465,9 @@ def page_backtest_reports() -> None:
             "n_signals": "信号数",
             "n_symbols": "标的数",
             "freqs": "周期",
-            "sharpe": "Sharpe",
-            "total_return": "总收益",
-            "max_dd": "最大回撤",
+            "sharpe_ratio": "Sharpe",
+            "total_return_pct": "总收益",
+            "max_dd_pct": "最大回撤",
         },
         inplace=True,
     )

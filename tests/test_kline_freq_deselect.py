@@ -34,7 +34,7 @@ def fake_get_kline_signals(exchange, symbol, start_d, end_d, freq=None):
     })
 
 
-def fake_fetch_kline_dataframe(tags, start_ms, end_ms, flight_url=None, kline_reverse=False):
+def fake_fetch_kline_dataframe(tags, start_ms, end_ms, flight_url=None, kline_reverse=False, kline_aggregate=""):
     st.session_state.setdefault("recorded_tags", []).append(
         (list(tags), bool(kline_reverse), str(st.query_params.get("symbol", "")))
     )
@@ -168,6 +168,20 @@ def test_remove_front_entry_preserves_hidden_state(at):
     assert at.pills(key="kfs_freq_pills_0_ths_600519").value is None
     info_texts = [i.value for i in at.info]
     assert any("所有标的均已隐藏" in t for t in info_texts)
+
+
+def test_clear_button_resets_to_default(at):
+    at.run()
+    assert _qp_value(at, "symbol") == "as:000001:1d,ths:600519:1h"
+
+    at.button(key="kfs_clear").click().run()
+
+    assert at.query_params.get("symbol", "") in ("", [], None)
+    assert at.query_params.get("start", "") in ("", [], None)
+    assert at.query_params.get("end", "") in ("", [], None)
+    assert at.query_params.get("all_signals", "") in ("", [], None)
+    info_texts = [i.value for i in at.info]
+    assert any("请通过「添加标的」" in t for t in info_texts)
 
 
 def test_quick_add_with_first_hidden_uses_default_freq(at):

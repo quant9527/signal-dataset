@@ -303,6 +303,14 @@ def to_echarts_macd(prep: pd.DataFrame, macd_keys: dict[str, str]) -> dict[str, 
 # ===========================================================
 
 
+def _strip_tz(ts):
+    """把 Timestamp/datetime 统一成 tz-naive；输入若已是 tz-naive 则原样返回."""
+    try:
+        return ts.tz_localize(None)
+    except (AttributeError, TypeError):
+        return ts
+
+
 def map_signals_to_bars(
     prep: pd.DataFrame,
     signals_df: pd.DataFrame,
@@ -313,20 +321,25 @@ def map_signals_to_bars(
     - 若提供 chart_freq，只保留 freq 列与之匹配的信号，避免跨周期堆叠。
     - 箭头方向优先以 signal 列（BUY/SELL）为准，side 列仅作兜底。
     - 同一 bar 同一方向同一策略仅保留一条，防止重复箭头。
+
+    注意：`prep["_x"]` 是 tz-naive（见 _prepare_kline_frame），而 `signal_date`
+    经过 `data.get_kline_signals` 通常也被 `normalize_signal_date_field` 归一为
+    tz-naive。但若上游喂了 tz-aware datetime（如 psycopg 直出的 timestamptz），
+    `bdt - sig_dt` 在日内分支会抛 TypeError。这里统一剥 tz，容忍任意上游输入。
     """
     if signals_df.empty:
         return []
     if chart_freq is not None and "freq" in signals_df.columns:
         signals_df = signals_df[signals_df["freq"].astype(str) == chart_freq]
 
-    bar_dates = prep["_x"].tolist()
+    bar_dates = [_strip_tz(d) for d in prep["_x"].tolist()]
     is_intraday = any(
         d.hour != 0 or d.minute != 0 or d.second != 0 for d in bar_dates
     )
     result: list[dict] = []
     seen: set[tuple[int, str, str]] = set()
     for _, sig in signals_df.iterrows():
-        sig_dt = sig["signal_date"]
+        sig_dt = _strip_tz(sig["signal_date"])
         matched_idx = None
         if is_intraday:
             # 日内周期：找时间戳最近的 bar

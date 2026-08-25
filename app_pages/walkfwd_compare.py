@@ -19,13 +19,16 @@ import app_pages.backtest_reports as br
 
 
 def _normalize_metrics(metrics: dict[str, Any], run_id: str) -> dict[str, Any]:
-    """把 backtest_report.stats_daily JSONB 字段归一化成扁平 dict。"""
+    """把 backtest_report.stats_daily JSONB 字段归一化成扁平 dict。
+
+    stats_daily 的 key 在写入端已统一为 *_pct 命名（百分数语义）。
+    """
     flat = {
         "run_id": run_id,
-        "total_return": metrics.get("Total Return [%]"),
-        "annual_return": metrics.get("Annualized Return [%]"),
-        "sharpe": metrics.get("Sharpe Ratio"),
-        "max_dd": metrics.get("Max Drawdown [%]"),
+        "total_return_pct": metrics.get("total_return_pct"),
+        "annual_return_pct": metrics.get("annual_return_pct"),
+        "sharpe_ratio": metrics.get("sharpe_ratio"),
+        "max_dd_pct": metrics.get("max_dd_pct"),
     }
     return flat
 
@@ -92,7 +95,7 @@ def page_walkfwd_compare() -> None:
 
     # 对照表
     rows = []
-    for k in ["total_return", "annual_return", "sharpe", "max_dd",
+    for k in ["total_return_pct", "annual_return_pct", "sharpe_ratio", "max_dd_pct",
               "n_signals", "n_trades"]:
         rows.append({
             "指标": k,

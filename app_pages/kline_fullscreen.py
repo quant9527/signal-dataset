@@ -170,6 +170,13 @@ def _group_entries(entries: list[SymbolToken]) -> dict[tuple[str, bool], list[Sy
     return groups
 
 
+# Frequency fallback chain: requested freq → 1d → no data.
+# Triggered when Flight returns empty for the requested freq (e.g. server side
+# 1w data not ingested). Keeps the page from going blank-red when someone
+# shares a URL with a freq the server doesn't carry.
+_FREQ_FALLBACK = ("1d",)
+
+
 def _default_new_entry_freq(entries: list[SymbolToken]) -> str:
     """新增标的继承首个可见标的的周期；首个为 hidden 或无标的时使用默认周期。"""
     if entries and entries[0].freq:
@@ -183,12 +190,20 @@ def _fetch_groups(
     end_ms: int,
     flight_url: str,
 ) -> dict[tuple[str, bool], pd.DataFrame]:
-    """按 (freq, reverse) 分组拉取 Flight K 线。"""
+    """按 (freq, reverse) 分组拉取 Flight K 线。
+
+    派生周期（`1w` / `1M`）服务端不直接入库，按 quant-lab `lab/data.py:296-297`
+    的做法：tag 用 `1d` 作为基础频，让 Flight 服务端按 `kline_aggregate="1w"`
+    在原始 1d 数据上聚合后返回。
+    """
     frames: dict[tuple[str, bool], pd.DataFrame] = {}
     for (freq, reverse), group in groups.items():
+        is_derived = freq in ("1w", "1M")
+        # 派生周期用 1d 作 tag 后缀；非派生周期 tag 直接用 freq。
+        base_freq = "1d" if is_derived else freq
         tags: list[str] = []
         for e in group:
-            tags.extend(fkc.build_kline_tags([e.symbol], e.exchange, freq))
+            tags.extend(fkc.build_kline_tags([e.symbol], e.exchange, base_freq))
         if not tags:
             continue
         raw = fkc.fetch_kline_dataframe(
@@ -197,6 +212,7 @@ def _fetch_groups(
             end_ms,
             flight_url=flight_url or None,
             kline_reverse=reverse,
+            kline_aggregate=freq if is_derived else "",
         )
         if raw is not None and not raw.empty:
             frames[(freq, reverse)] = raw
@@ -289,6 +305,22 @@ def _redirect_when_empty(raw_symbol: str) -> None:
     """
     st.info("请通过「添加标的」选择至少一个标的，或通过 URL 参数 `symbol` 传入标的。")
     st.stop()
+
+
+# K 线页业务状态全部挂在 URL query params 上；清空即回到默认状态。
+_KLINE_QUERY_KEYS = ("symbol", "start", "end", "all_signals")
+
+
+def _clear_to_default() -> None:
+    """清空 K 线页全部状态（标的、日期、信号开关），回到默认空状态。"""
+    for key in _KLINE_QUERY_KEYS:
+        if key in st.query_params:
+            del st.query_params[key]
+    # 同时重置页内所有 widget 的 session_state，避免旧值在 rerun 后残留。
+    for key in list(st.session_state.keys()):
+        if key.startswith("kfs_"):
+            del st.session_state[key]
+    st.rerun()
 
 
 def page_kline_fullscreen() -> None:
@@ -417,7 +449,7 @@ def page_kline_fullscreen() -> None:
         st.stop()
 
     # ---------- 日期 & 信号设置 ----------
-    c_d1, c_d2, c_sig = st.columns([2, 2, 3], vertical_alignment="center", gap="small")
+    c_d1, c_d2, c_sig, c_clear = st.columns([2, 2, 3, 1], vertical_alignment="center", gap="small")
     with c_d1:
         start_input = st.date_input("开始日期", value=start_d, key="kfs_start")
     with c_d2:
@@ -429,6 +461,16 @@ def page_kline_fullscreen() -> None:
             key="kfs_all_signals",
             help="开启后叠加所有周期（15m/30m/1h/1d/1w）的买卖信号",
         )
+    with c_clear:
+        if st.button(
+            "清空",
+            key="kfs_clear",
+            icon=":material/restart_alt:",
+            type="secondary",
+            width="stretch",
+            help="清除标的、日期与信号设置，回到默认状态",
+        ):
+            _clear_to_default()
 
     if start_input > end_input:
         st.error("开始日期不能晚于结束日期。")
@@ -451,13 +493,62 @@ def page_kline_fullscreen() -> None:
     end_ms = int(pd.Timestamp(end_d, tz="Asia/Shanghai").replace(hour=23, minute=59, second=59).timestamp() * 1000)
     flight_url = kc.resolve_flight_url()
 
+    # 记录每个 entry 实际请求的 freq（fallback 时用于回写 URL / 提示用户）。
+    requested_freq: dict[str, str] = {
+        e.token: e.freq for e in entries if e.freq is not None
+    }
+
     groups = _group_entries(entries)
     with st.spinner("正在从 Flight 拉取 K 线…"):
         frames = _fetch_groups(groups, start_ms, end_ms, flight_url)
 
+    # 找不到数据的 entry：按 entry 粒度 fallback 到 _FREQ_FALLBACK 中的 freq，
+    # 避免整个页面因个别 freq 服务端缺数据而红框。
+    fallback_used: list[tuple[str, str, str]] = []  # (token, requested, actual)
+    for fb_freq in _FREQ_FALLBACK:
+        # 找出当前还需要拉、且目标 freq 不是 fb_freq 的 entry
+        fb_groups: dict[tuple[str, bool], list[SymbolToken]] = {}
+        for e in entries:
+            if e.freq is None:
+                continue
+            if (e.freq, e.reverse) in frames:
+                continue  # 已经拉到了
+            if e.freq == fb_freq:
+                continue  # 已经按这个 freq 试过，跳过
+            fb_groups.setdefault((fb_freq, e.reverse), []).append(
+                SymbolToken(e.exchange, e.symbol, fb_freq, e.reverse)
+            )
+        if not fb_groups:
+            continue
+        fb_frames = _fetch_groups(fb_groups, start_ms, end_ms, flight_url)
+        # 把 fallback 拉到结果挂到 (fb_freq, reverse) 这个 key。
+        # 再把这些 entry 的 freq 改写为 fb_freq，让 _build_charts 能取到 frame。
+        for i, e in enumerate(entries):
+            if e.freq is None:
+                continue
+            if (e.freq, e.reverse) in frames:
+                continue
+            if (fb_freq, e.reverse) in fb_frames and not fb_frames[(fb_freq, e.reverse)].empty:
+                entries[i] = SymbolToken(e.exchange, e.symbol, fb_freq, e.reverse)
+                frames[(fb_freq, e.reverse)] = fb_frames[(fb_freq, e.reverse)]
+                fallback_used.append((e.token, requested_freq[e.token], fb_freq))
+
     if not frames:
         st.error("拉取失败或该时间范围内无数据：请确认 Flight 服务已启动，且已安装 `pyarrow`。")
         st.stop()
+
+    if fallback_used:
+        st.info(
+            "以下标的在请求的周期下 Flight 无数据，已自动降级到 `1d`："
+            + "、".join(
+                f"{tok}({req}→{act})" for tok, req, act in fallback_used
+            )
+        )
+        # 把 freq 同步到 URL，使后续刷新直接用 1d 不再触发 fallback 链。
+        # 不调 st.rerun() — fallback 已生效，图表可以直接渲染。
+        st.query_params["symbol"] = ",".join(
+            e.token for e in entries if e.freq is not None
+        )
 
     charts, metas, bar_counts = _build_charts(entries, frames, start_d, end_d, all_signals=all_signals)
     if not charts:

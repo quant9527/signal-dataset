@@ -82,11 +82,18 @@ def fetch_kline_dataframe(
     flight_url: str | None = None,
     *,
     kline_reverse: bool = False,
+    kline_aggregate: str = "",
 ) -> pd.DataFrame | None:
     """
     单次 do_get，返回 Flight 完整 K 线表（多标的混表）。
     请求体与 quant-lab / signalview data._get_latest_market_flight 一致。
     kline_reverse：与 quant-lab 一致，控制服务端是否对 K 线做镜像反转处理。
+    kline_aggregate：与 quant-lab `do_get_kline` 一致。派生周期（`1w` / `1M`）
+        服务端不直接入库，需要传原始 `1d` 数据 + `aggregate="1w"`，由服务端做
+        周期聚合。signalview 调用方应当：
+        - 若 entry.freq 是派生频率，把 tag 后缀改为 `"1d"`；
+        - 把 entry.freq 作为 `kline_aggregate` 一并传入；
+        （kline_fullscreen._fetch_groups 内部统一处理这一映射）
     """
     if not tags:
         return None
@@ -100,7 +107,7 @@ def fetch_kline_dataframe(
         "start_time": int(start_time_ms),
         "end_time": int(end_time_ms),
         "tags": tags,
-        "kline_aggregate": "",
+        "kline_aggregate": kline_aggregate,
         "kline_reverse": bool(kline_reverse),
     }
     try:

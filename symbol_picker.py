@@ -19,13 +19,21 @@ import streamlit as st
 
 from constants import (
     EXCHANGE_AS_ALL,
+    EXCHANGE_CRYPTO,
     KLINE_DEFAULT_FREQ,
     KLINE_EXCHANGE_OPTIONS,
     KLINE_EXCHANGE_SELECT_OPTIONS,
     KLINE_FREQ_SET,
 )
 from data import get_instruments_by_exchange
-from signal_constants import AS_ALL_EXCHANGES
+from signal_constants import AS_ALL_EXCHANGES, CRYPTO_EXCHANGES
+
+
+# 聚合交易所：下拉展示用聚合项 -> 实际合并的真实交易所列表。
+_AGGREGATE_EXCHANGES: dict[str, tuple[str, ...]] = {
+    EXCHANGE_AS_ALL: AS_ALL_EXCHANGES,
+    EXCHANGE_CRYPTO: CRYPTO_EXCHANGES,
+}
 
 
 def _split_symbol_input(raw: str) -> list[str]:
@@ -68,13 +76,15 @@ def _clean_symbol_code(sym: str) -> str:
 
 
 def _instruments_for_exchange(exchange: str) -> pd.DataFrame:
-    """按交易所获取 instrument；as_all 时合并 as/ths/asindex 三张表。
+    """按交易所获取 instrument；聚合项（as_all / crypto）时合并多张表。
 
     返回列与 get_instruments_by_exchange 一致：exchange, symbol, name, sub_exchange, alias。
     """
-    if exchange == EXCHANGE_AS_ALL:
+    if exchange in _AGGREGATE_EXCHANGES:
         frames = [
-            f for ex in AS_ALL_EXCHANGES if not (f := get_instruments_by_exchange(ex)).empty
+            f
+            for ex in _AGGREGATE_EXCHANGES[exchange]
+            if not (f := get_instruments_by_exchange(ex)).empty
         ]
         if not frames:
             return pd.DataFrame()
@@ -109,14 +119,14 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
             placeholder="交易所",
         )
 
-    is_as_all = a_exchange == EXCHANGE_AS_ALL
+    is_aggregate = a_exchange in _AGGREGATE_EXCHANGES
     add_inst = _instruments_for_exchange(a_exchange)
     # 占位 sentinel：让 selectbox 默认指向它而非真实标的，避免打开页面
     # 就把 "000001 平安银行" 之类排第一的项当作"已选"。
     PLACEHOLDER = "__placeholder__"
     with c2:
         if not add_inst.empty:
-            if is_as_all:
+            if is_aggregate:
                 # 合集下代码会跨交易所重复，用 "exchange:symbol" 作为选项值以消歧
                 sym_list = sorted(
                     add_inst["exchange"].astype(str) + ":" + add_inst["symbol"].astype(str)
@@ -202,11 +212,11 @@ def symbol_picker_add_ui(key_prefix: str = "sp") -> tuple[str, str] | None:
         return None
 
     st.session_state[confirm_key] = raw_val
-    if is_as_all:
+    if is_aggregate:
         if ":" in raw_val:
             ex, sym = raw_val.split(":", 1)
             ex = ex.strip().lower()
-            if ex in AS_ALL_EXCHANGES:
+            if ex in _AGGREGATE_EXCHANGES[a_exchange]:
                 sym_val = _clean_symbol_code(sym.strip())
                 if sym_val:
                     return (ex, sym_val)
