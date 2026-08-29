@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - '**'
+  workflow_dispatch:
 
 env:
   APP_NAME: signalview
@@ -33,15 +34,23 @@ jobs:
       - name: Set image tag
         id: image_tag
         run: |
-          echo "new_image_tag=${{ env.APP_NAME }}-${{ steps.vars.outputs.branch }}-${{ steps.vars.outputs.sha_short }}" >>$GITHUB_OUTPUT
-          echo "branch_sha=${{ steps.vars.outputs.branch }}-${{ steps.vars.outputs.sha_short }}" >>$GITHUB_OUTPUT
+          branch="${{ steps.vars.outputs.branch }}"
+          repo="${{ env.DOCKER_REPO }}"
+          # 所有分支都推 commit id 固定 tag（可追溯/回滚）
+          tags="${repo}:${{ env.APP_NAME }}-${branch}-${{ steps.vars.outputs.sha_short }}"
+          # latest 仅 main 分支推送，避免 feature 分支污染
+          if [ "$branch" = "main" ]; then
+            tags="${tags},${repo}:latest"
+          fi
+          echo "new_image_tag=${{ env.APP_NAME }}-${branch}-${{ steps.vars.outputs.sha_short }}" >>$GITHUB_OUTPUT
+          echo "all_tags=$tags" >>$GITHUB_OUTPUT
 
       - id: build-push-image
         uses: quant9527/deploy-action@main
         with:
           registry_username: ${{ vars.DOCKERHUB_USERNAME }}
           registry_password: ${{ secrets.DOCKERHUB_TOKEN }}
-          tag: ${{ env.DOCKER_REPO }}:${{ steps.image_tag.outputs.new_image_tag }},${{ env.DOCKER_REPO }}:latest
+          tag: ${{ steps.image_tag.outputs.all_tags }}
           file: ./Dockerfile
           platforms: linux/amd64
 
@@ -49,6 +58,7 @@ jobs:
         shell: bash
 
       - name: Invoke workflow in another repo with inputs
+        if: github.ref == 'refs/heads/main'
         uses: benc-uk/workflow-dispatch@v1
         with:
           workflow: trigger-set-image.yml
