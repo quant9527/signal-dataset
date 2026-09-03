@@ -38,9 +38,10 @@ jobs:
           repo="${{ env.DOCKER_REPO }}"
           # 所有分支都推 commit id 固定 tag（可追溯/回滚）
           tags="${repo}:${{ env.APP_NAME }}-${branch}-${{ steps.vars.outputs.sha_short }}"
-          # latest 仅 main 分支推送，避免 feature 分支污染
+          # signalview-latest 仅 main 分支推送，避免 feature 分支污染；
+          # jei888/quant 仓库多服务共用，不能用通用 latest
           if [ "$branch" = "main" ]; then
-            tags="${tags},${repo}:latest"
+            tags="${tags},${repo}:${{ env.APP_NAME }}-latest"
           fi
           echo "new_image_tag=${{ env.APP_NAME }}-${branch}-${{ steps.vars.outputs.sha_short }}" >>$GITHUB_OUTPUT
           echo "all_tags=$tags" >>$GITHUB_OUTPUT
