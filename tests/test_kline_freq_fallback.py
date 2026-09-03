@@ -16,6 +16,7 @@ import os
 import tempfile
 
 import pandas as pd
+import streamlit
 
 
 def _run_page_with_mock_fetch(allow_aggregates, allow_bases):
@@ -78,6 +79,17 @@ kfs._build_preset_name_map = lambda presets: {{(ex,sym): f"{{ex}}:{{sym}}" for e
 from app_pages.kline_fullscreen import page_kline_fullscreen
 page_kline_fullscreen()
 '''
+    # 被测 script 会替换模块级全局（streamlit.query_params / kfs 名称缓存等），
+    # 运行后必须恢复，否则污染同进程内后续 AppTest（见 tests/test_kline_freq_options.py）。
+    from app_pages import kline_fullscreen as _kfs
+    from streamlit.components import v1 as _scv1
+
+    _saved = (
+        streamlit.query_params,
+        _scv1.html,
+        _kfs._build_symbol_name_map,
+        _kfs._build_preset_name_map,
+    )
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir="/home/lei/repo/signalview") as f:
         f.write(script)
         path = f.name
@@ -87,6 +99,12 @@ page_kline_fullscreen()
         at.run()
         return at
     finally:
+        (
+            streamlit.query_params,
+            _scv1.html,
+            _kfs._build_symbol_name_map,
+            _kfs._build_preset_name_map,
+        ) = _saved
         os.unlink(path)
 
 

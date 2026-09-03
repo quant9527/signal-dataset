@@ -20,7 +20,7 @@ import data
 import flight_kline_client as fkc
 from app_pages import _kline_common as common
 from app_pages import kline_charts as kc
-from constants import KLINE_DEFAULT_FREQ, KLINE_FREQ_OPTIONS
+from constants import KLINE_DEFAULT_FREQ, kline_freq_options_for_exchange
 from symbol_picker import (
     SymbolToken,
     encode_symbol_token,
@@ -418,10 +418,11 @@ def page_kline_fullscreen() -> None:
                 # 同一只标的可能以不同频率同时出现（如 as:002827:1h 与 as:002827:1d），
                 # key 必须包含列表索引才能唯一。
                 pills_key = f"kfs_freq_pills_{i}_{e.exchange}_{_widget_key_safe(e.symbol)}"
+                freq_options = kline_freq_options_for_exchange(e.exchange)
                 new_freq = st.pills(
                     f"周期_{i}",
-                    options=list(KLINE_FREQ_OPTIONS),
-                    default=e.freq if e.freq in KLINE_FREQ_OPTIONS else None,
+                    options=list(freq_options),
+                    default=e.freq if e.freq in freq_options else None,
                     key=pills_key,
                     label_visibility="collapsed",
                 )
